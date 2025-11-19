@@ -1,0 +1,10 @@
+# Ignore common document file types
+*.pdf
+*.docx
+*.doc
+
+# Ignore Python bytecode files and venv
+venv/
+__pycache__/
+*.pyc
+*.pyo
