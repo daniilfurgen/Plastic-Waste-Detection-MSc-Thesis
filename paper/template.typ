@@ -43,7 +43,11 @@
   )
 
   // Налаштування списків
-  show: el.paragraph-enum-list
+  show: el.paragraph-enum-list.with(indent: 1cm)
+
+  // Налаштування блоків з кодом
+  show: codly-init.with()
+  codly(languages: codly-languages)
 
   // Налаштування загловків
   show heading: set text(size: 14pt)
@@ -67,6 +71,9 @@
   }
   set figure.caption(separator: [. ])
 
+  // Виноски
+  show footnote.entry: set text(size: 12pt)
+
   body
 }
 
@@ -78,6 +85,10 @@
   set block(spacing: line-spacing)
   show heading: set block(spacing: line-spacing)
   show heading.where(level: 1): set block(below: 2em)
+
+  // Особливі терміни та симовли
+  show "F1": $F_1$
+  show "XX": highlight([XX (Замінити!)])
 
   body
 }
