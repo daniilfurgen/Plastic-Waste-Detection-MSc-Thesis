@@ -1,5 +1,8 @@
 #import "../template.typ": culine
 #import "@preview/icu-datetime:0.2.0" as icu
+#import "@preview/itemize:0.2.0" as el
+
+#show: el.paragraph-enum-list.with(indent: 0cm)
 
 #let signature-field(underscript) = [
   #set text(baseline: 1em)
