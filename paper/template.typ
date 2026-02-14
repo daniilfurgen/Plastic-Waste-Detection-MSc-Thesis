@@ -43,7 +43,7 @@
   )
 
   // Налаштування списків
-  show: el.paragraph-enum-list.with(indent: 1cm)
+  show: el.paragraph-enum-list.with(indent: (1cm, auto))
 
   // Налаштування блоків з кодом
   show: codly-init.with()
