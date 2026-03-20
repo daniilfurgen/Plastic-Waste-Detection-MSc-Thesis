@@ -1,3 +1,4 @@
+// LTeX: enabled=false
 #import "@preview/codly:1.3.0": *
 #import "@preview/codly-languages:0.1.10": *
 #import "@preview/itemize:0.2.0" as el
@@ -28,12 +29,13 @@
   // Налаштування тексту
   set text(
     size: 14pt,
-    font: "Times New Roman",
+    font: ("Liberation Serif", "Times New Roman"),
     hyphenate: false,
     lang: "uk",
   )
   set par(
     justify: true,
+    justification-limits: (tracking: (min: -0.01em, max: 0.02em)),
     leading: line-spacing,
     spacing: line-spacing,
     first-line-indent: (amount: 1cm, all: true),
@@ -48,6 +50,7 @@
   // Налаштування блоків з кодом
   show: codly-init.with()
   codly(languages: codly-languages)
+  show raw: set text(size: 12pt, font: "Iosevka Slab")
 
   // Налаштування загловків
   show heading: set text(size: 14pt)
@@ -69,7 +72,11 @@
   show figure.caption.where(kind: table): it => {
     align(right, it)
   }
-  set figure.caption(separator: [. ])
+  set figure.caption(separator: [ --- ])
+
+  // Математичні формули
+  set math.equation(numbering: "(1)")
+  show math.equation: set text(font: "STIX Two Math")
 
   // Виноски
   show footnote.entry: set text(size: 12pt)
@@ -81,7 +88,7 @@
   // Відступ між рядками
   let line-spacing = .65em * 1.5
 
-  set par(leading: line-spacing)
+  set par(leading: line-spacing, spacing: line-spacing)
   set block(spacing: line-spacing)
   show heading: set block(spacing: line-spacing)
   show heading.where(level: 1): set block(below: 2em)
@@ -89,6 +96,18 @@
   // Особливі терміни та симовли
   show "F1": $F_1$
   show "XX": highlight([XX (Замінити!)])
+
+  body
+}
+
+#let abstract-paper-config(body) = {
+  show: config.with()
+  show: main-body-spacing.with()
+  set page(numbering: none, margin: (right: 1cm, rest: 2cm))
+
+  show heading.where(level: 1): set block(below: .65em * 1.5, above: 2em)
+  set heading(numbering: "1.")
+  show heading.where(level: 1): upper
 
   body
 }
