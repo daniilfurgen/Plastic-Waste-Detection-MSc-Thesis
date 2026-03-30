@@ -69,10 +69,13 @@
 
   // Налаштування підписів
   show figure.where(kind: table): set figure.caption(position: top)
-  show figure.caption.where(kind: table): it => {
-    align(right, it)
-  }
-  set figure.caption(separator: [ --- ])
+  show figure.where(kind: table): set align(right)
+  // show figure.caption.where(kind: table): set align(right)
+  set figure.caption(separator: [. ])
+
+  // Налаштування веб-посилань
+  // show link: set text(fill: navy)
+  // show link: underline
 
   // Математичні формули
   set math.equation(numbering: "(1)")
@@ -102,12 +105,19 @@
 
 #let abstract-paper-config(body) = {
   show: config.with()
-  show: main-body-spacing.with()
-  set page(numbering: none, margin: (right: 1cm, rest: 2cm))
 
-  show heading.where(level: 1): set block(below: .65em * 1.5, above: 2em)
+  set page(numbering: none, margin: 2cm)
+  set text(font: "Times New Roman", size: 15pt)
+  set par(first-line-indent: (amount: .75cm, all: true))
+  show: el.paragraph-enum-list.with(indent: (.75cm, auto))
+
+  show heading.where(level: 1): set block(above: 2em)
   set heading(numbering: "1.")
-  show heading.where(level: 1): upper
+  show heading: set text(size: 15pt)
+  show heading: it => {
+    set align(left)
+    block(inset: (left: .75cm), it)
+  }
 
   body
 }
