@@ -1,0 +1,7 @@
+path: /home/daniilsan/projects/MSc-Thesis/code/FLoW-img
+train: train_sliced/images
+val: val_sliced/images
+
+nc: 1
+names:
+  0: bottle
