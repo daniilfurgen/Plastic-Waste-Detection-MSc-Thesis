@@ -1,0 +1,30 @@
+# 33/50 iterations complete ✅ (50606.27s)
+# Results saved to /home/daniilsan/projects/MSc-Thesis/runs/detect/tune
+# Best fitness=0.4724 observed at iteration 9
+# Best fitness metrics are {'metrics/precision(B)': 0.85298, 'metrics/recall(B)': 0.84881, 'metrics/mAP50(B)': 0.89387, 'metrics/mAP50-95(B)': 0.4724, 'val/box_loss': 1.26346, 'val/cls_loss': 0.71069, 'val/dfl_loss': 0.00339, 'fitness': 0.4724}
+# Best fitness model is /home/daniilsan/projects/MSc-Thesis/runs/detect/train2
+lr0: 0.00687
+lrf: 0.01485
+momentum: 0.87075
+weight_decay: 0.0
+warmup_epochs: 3.09371
+warmup_momentum: 0.5245
+box: 5.2086
+cls: 0.51549
+dfl: 1.46404
+hsv_h: 0.02892
+hsv_s: 0.7064
+hsv_v: 0.35467
+degrees: 0.0
+translate: 0.15174
+scale: 0.64838
+shear: 0.00542
+perspective: 0.00042
+flipud: 0.01014
+fliplr: 0.42111
+bgr: 0.00217
+mosaic: 0.7235
+mixup: 0.00525
+cutmix: 0.00124
+copy_paste: 6.0e-05
+close_mosaic: 8

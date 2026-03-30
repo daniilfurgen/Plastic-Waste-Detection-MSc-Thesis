@@ -1,0 +1,5 @@
+# Ignore the FLoW-img directory, which containes the dataset and not allowed to be shared.
+FLoW-img/
+
+# Ignore pretrained models
+*.pt
