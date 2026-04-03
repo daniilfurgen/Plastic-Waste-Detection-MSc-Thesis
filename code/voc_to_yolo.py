@@ -53,10 +53,10 @@ def convert_annotation(xml_path: str, output_path: str) -> None:
 
 
 if __name__ == "__main__":
-    # input_dir = "code/FLoW-img/val/annotations"
-    # output_dir = "code/FLoW-img/val/labels"
-    input_dir = "code/FLoW-img/train/annotations"
-    output_dir = "code/FLoW-img/train/labels"
+    # input_dir = "code/FloW-img/val/annotations"
+    # output_dir = "code/FloW-img/val/labels"
+    input_dir = "code/FloW-img/train/annotations"
+    output_dir = "code/FloW-img/train/labels"
 
     os.makedirs(output_dir, exist_ok=True)
 
