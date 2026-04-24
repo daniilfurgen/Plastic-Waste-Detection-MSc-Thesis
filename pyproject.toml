@@ -1,0 +1,22 @@
+[project]
+name = "msc-thesis"
+version = "0.1.0"
+description = "MSc Thesis Project. This project focuses on the development and evaluation of applied machine learning techniques for object detection of plastic waste in marine environments."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "ipykernel>=7.2.0",
+    "matplotlib>=3.10.9",
+    "onnxruntime-gpu>=1.25.0",
+    "onnxslim>=0.1.91",
+    "opencv-python>=4.11.0.86",
+    "polars>=1.40.1",
+    "pycocotools>=2.0.11",
+    "pyyaml>=6.0.3",
+    "sahi>=0.11.36",
+    "scipy>=1.17.1",
+    "supervision>=0.27.0.post2",
+    "torch>=2.11.0",
+    "torchvision>=0.26.0",
+    "ultralytics>=8.4.41",
+]
