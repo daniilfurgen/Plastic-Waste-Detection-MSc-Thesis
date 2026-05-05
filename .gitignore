@@ -1,7 +1,3 @@
-# Ignore common document file types
-*.docx
-*.doc
-
 # Ignore Python bytecode files and venv
 .venv/
 __pycache__/

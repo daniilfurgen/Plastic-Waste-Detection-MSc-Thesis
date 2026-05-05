@@ -1,6 +1,7 @@
 {
   "ltex.hiddenFalsePositives": {
     "uk-ua": [
+      "{\"rule\":\"COMMA_PARENTHESIS_WHITESPACE\",\"sentence\":\"^\\\\QПорівняльні результати роботи моделей наведено в .\\\\E$\"}",
       "{\"rule\":\"torgovelnyi_vs_torgivelnyi\",\"sentence\":\"^\\\\Qстудент магістр, Державний торговельно-економічний університет, Україна (\\\\E(?:Dummy|Ina|Jimmy-|Dummy-|Maniquí-|Maniquíes-|Dummy\\\\+|Dummy's\\\\+)[0-9]+\\\\Q/0009-0004-6600-5557]\\\\E$\"}",
       "{\"rule\":\"UPPERCASE_SENTENCE_START\",\"sentence\":\"^\\\\Qfirst-line-indent: 0em\\nleft\\nЗапропоновано методологію на основі нейронної мережі YOLO26 та фреймворку Slicing-Aided Hyper Inference (SAHI) для детекції пластикових відходів у відкритих водоймах.\\\\E$\"}",
       "{\"rule\":\"UPPERCASE_SENTENCE_START\",\"sentence\":\"^\\\\Qfirst-line-indent: 0em\\nleft\\nПроведено порівняльний аналіз ефективності сучасної архітектури YOLO26 та фреймворку SAHI.\\\\E$\"}",
@@ -11,6 +12,7 @@
     ]
   },
   "ltex.dictionary": {
-    "en-US": ["SAHI"]
+    "en-US": ["SAHI"],
+    "uk-ua": ["аугментованої", "датасеті", "Санжаров"]
   }
 }

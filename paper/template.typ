@@ -121,3 +121,17 @@
 
   body
 }
+
+#let collection-paper-config(body) = {
+  show: config.with()
+
+  set page(numbering: "1", margin: 2cm, footer-descent: 0em)
+  set text(font: "Times New Roman", size: 12pt)
+  set par(first-line-indent: (amount: 1cm, all: true))
+  show: el.paragraph-enum-list.with(indent: (1cm, auto))
+
+  show heading.where(level: 1): set block(above: 2em)
+  show heading: set text(size: 14pt)
+  body
+}
+
