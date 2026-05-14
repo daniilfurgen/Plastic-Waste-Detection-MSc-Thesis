@@ -135,3 +135,18 @@
   body
 }
 
+#let conference-paper-config(body) = {
+  show: config.with()
+
+  set page(numbering: none, margin: 2cm)
+  set text(font: "Times New Roman", size: 14pt)
+  set par(first-line-indent: (amount: 1.25cm, all: true), leading: .65em * 1.5, spacing: .65em * 1.5)
+  set block(spacing: .65em * 1.5 * 2)
+  show: el.paragraph-enum-list.with(indent: (1.25cm, auto))
+
+  show heading.where(level: 1): set block(above: 2em)
+  set heading(numbering: "1.")
+  show heading: set text(size: 15pt)
+
+  body
+}

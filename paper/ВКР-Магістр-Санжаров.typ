@@ -1,3 +1,5 @@
+// License: CC-BY-4.0
+
 #import "template.typ": *
 
 #set page(foreground: {
