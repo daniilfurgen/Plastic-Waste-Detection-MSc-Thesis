@@ -6,3 +6,10 @@ __pycache__/
 
 # Ignore Ultralytics directories
 runs/
+*.pt
+
+# Ignore dataset directories
+data/*
+
+# Ignore logs
+*.log

@@ -1,7 +1,0 @@
-path: /home/daniilsan/projects/MSc-Thesis/code/FloW-img
-train: train/images
-val: val/images
-
-nc: 1
-names:
-  0: bottle
