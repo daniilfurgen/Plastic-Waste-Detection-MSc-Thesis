@@ -55,6 +55,7 @@ import torch
 
 torch.backends.cudnn.benchmark = False
 
+# Configure paths relative to the repo root.
 ROOT = Path.cwd().resolve()
 ORIG_DATA_YAML = ROOT / "data" / "flow_img.yaml"
 
@@ -65,11 +66,19 @@ RUNS_DIR = ROOT / "runs"
 PSEUDO_RUN_DIR = RUNS_DIR / "pseudo"
 TUNE_RUN_DIR = RUNS_DIR / "tune"
 
-# yolo26*-p2.yaml/.pt adds a P2 small-object detection head -- worth using
-# given small-object detection is your central bottleneck. Swap for plain
-# "yolo26m.pt" if you want the standard head for your baseline comparison.
-BASE_WEIGHTS = "yolo26m-p2.yaml"
+# Configure the YOLO26 model size and whether to use the P2 small-object detection head.
+# P2 head is a part of FPN that has a higher resolution feature map for detecting small objects.
+# If your dataset has many small objects, consider using P2_HEAD = True.
+SIZE = "m"  # "n", "s", "m", "l", "x" -- YOLO26 model size
+P2_HEAD = True  # use P2 small-object detection head (yolo26*-p2.yaml/.pt)
+BASE_CONFIGURATION = f"yolo26{SIZE}-p2.yaml" if P2_HEAD else f"yolo26{SIZE}.yaml"
+PRETRAINED_WEIGHTS = f"yolo26{SIZE}.pt"
 
+# Configure the name of the experiment run.
+EXRUN_NAME = "YOLO26m-P2-SSL w/ pretrained weights"
+
+BATCH = 10  # Optimal batch size benchmarked for RTX 4070 (12GB) to avoid RAM spillover
+WORKERS = 4  # DataLoader workers
 N_ROUNDS = 3
 EPOCHS_PER_ROUND = 150
 PATIENCE = 25  # early stopping -- avoids burning unattended hours on a plateau
@@ -89,10 +98,13 @@ TUNE_SEED = 42
 
 LOG_FILE = ROOT / "pipeline.log"
 
+file_handler = logging.FileHandler(LOG_FILE)
+file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()],
+    handlers=[file_handler, logging.StreamHandler()],
 )
 log = logging.getLogger("pseudo_pipeline")
 
@@ -120,7 +132,11 @@ def resolve_image_list(data_cfg: dict, split: str) -> list[Path]:
             p for p in entry.rglob("*") if p.suffix.lower() in {".jpg", ".jpeg", ".png"}
         )
     lines = entry.read_text().splitlines()
-    return [Path(l) if Path(l).is_absolute() else root / l for l in lines if l.strip()]
+    return [
+        Path(line) if Path(line).is_absolute() else root / line
+        for line in lines
+        if line.strip()
+    ]
 
 
 def make_pseudo_labels(model: YOLO, round_idx: int, conf: float) -> int:
@@ -224,6 +240,30 @@ def build_tuning_subset_yaml(
     return subset_yaml_path
 
 
+def log_environment_info() -> None:
+    """Log current system RAM and GPU VRAM stats to help monitor resources."""
+    try:
+        import psutil
+
+        ram_total = psutil.virtual_memory().total / (1024**3)
+        ram_avail = psutil.virtual_memory().available / (1024**3)
+        ram_info = f"RAM: {ram_avail:.1f} GB available / {ram_total:.1f} GB total"
+    except Exception:
+        ram_info = "RAM: N/A"
+
+    gpu_info = "GPU: None (CPU mode)"
+    if torch.cuda.is_available():
+        name = torch.cuda.get_device_name(0)
+        total_vram = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        alloc_vram = torch.cuda.memory_allocated(0) / (1024**3)
+        res_vram = torch.cuda.memory_reserved(0) / (1024**3)
+        gpu_info = (
+            f"GPU: {name} | VRAM: {alloc_vram:.2f} GB allocated, "
+            f"{res_vram:.2f} GB reserved / {total_vram:.1f} GB total"
+        )
+    log.info(f"Resource status: {gpu_info} | {ram_info}")
+
+
 # --------------------------------------------------------------------------- #
 # Stage 1 (optional): hyperparameter tuning on the small subset
 # --------------------------------------------------------------------------- #
@@ -231,12 +271,20 @@ def build_tuning_subset_yaml(
 
 def run_hyperparameter_tuning() -> dict:
     subset_yaml = build_tuning_subset_yaml()
-    model = YOLO(BASE_WEIGHTS)
+    model = YOLO(BASE_CONFIGURATION)
+    model.load(PRETRAINED_WEIGHTS)
     log.info("Starting hyperparameter tuning (genetic algorithm, fully automatic)...")
+    log.info(
+        f"Tuning config: batch={BATCH}, workers={WORKERS}, imgsz={IMG_SIZE}, "
+        f"model={BASE_CONFIGURATION}, weights={PRETRAINED_WEIGHTS}"
+    )
+    log_environment_info()
     model.tune(
         data=str(subset_yaml),
         epochs=30,  # short trials -- only need relative ranking between configs
         iterations=10,  # generations of the genetic search; raise/lower per your budget
+        batch=BATCH,
+        workers=WORKERS,
         imgsz=IMG_SIZE,
         patience=10,
         project=str(TUNE_RUN_DIR),
@@ -260,13 +308,22 @@ def run_hyperparameter_tuning() -> dict:
 
 def run_pipeline(hyp_overrides: dict | None = None):
     hyp_overrides = hyp_overrides or {}
-    weights = BASE_WEIGHTS
+    configuration = BASE_CONFIGURATION
+    weights = PRETRAINED_WEIGHTS
     summary_rows = []
+
+    log.info(
+        f"Pipeline config: batch={BATCH}, workers={WORKERS}, imgsz={IMG_SIZE}, "
+        f"epochs_per_round={EPOCHS_PER_ROUND}, patience={PATIENCE}, "
+        f"model={BASE_CONFIGURATION}, initial_weights={PRETRAINED_WEIGHTS}"
+    )
+    log_environment_info()
 
     for round_idx in range(N_ROUNDS):
         try:
             log.info(f"=== Round {round_idx}: training ===")
-            model = YOLO(weights)
+            model = YOLO(configuration)
+            model.load(weights)
 
             if round_idx == 0:
                 data_yaml = ORIG_DATA_YAML
@@ -276,9 +333,17 @@ def run_pipeline(hyp_overrides: dict | None = None):
                     round_idx, max_pseudo=int(real_n * MAX_PSEUDO_RATIO)
                 )
 
+            log.info(
+                f"Round {round_idx} training started: model={configuration}, "
+                f"data={data_yaml}, batch={BATCH}, workers={WORKERS}, imgsz={IMG_SIZE}"
+            )
+            log_environment_info()
+
             train_results = model.train(
                 data=str(data_yaml),
                 epochs=EPOCHS_PER_ROUND,
+                batch=BATCH,
+                workers=WORKERS,
                 patience=PATIENCE,
                 imgsz=IMG_SIZE,
                 project=str(PSEUDO_RUN_DIR),
@@ -286,7 +351,10 @@ def run_pipeline(hyp_overrides: dict | None = None):
                 exist_ok=True,
                 **hyp_overrides,
             )
-            weights = Path(train_results.save_dir) / "weights" / "best.pt"
+            configuration = Path(train_results.save_dir) / "weights" / "best.pt"  # type: ignore
+            log.info(
+                f"Round {round_idx} training finished. Best checkpoint: {configuration}"
+            )
 
             # Always evaluate against the original, fixed human-labeled val set.
             metrics = model.val(data=str(ORIG_DATA_YAML), split="val")
@@ -296,7 +364,7 @@ def run_pipeline(hyp_overrides: dict | None = None):
             summary_rows.append(
                 {
                     "round": round_idx,
-                    "weights": str(weights),
+                    "weights": str(configuration),
                     "mAP50": float(metrics.box.map50),
                     "mAP50_95": float(metrics.box.map),
                 }
@@ -307,7 +375,7 @@ def run_pipeline(hyp_overrides: dict | None = None):
                     f"=== Round {round_idx}: generating pseudo-labels for next round ==="
                 )
                 make_pseudo_labels(
-                    YOLO(weights), round_idx, conf=CONF_SCHEDULE[round_idx]
+                    YOLO(configuration), round_idx, conf=CONF_SCHEDULE[round_idx]
                 )
 
         except (
@@ -333,6 +401,12 @@ if __name__ == "__main__":
     #   N_ROUNDS = 1; EPOCHS_PER_ROUND = 2; TUNE_FRACTION = 0.02; iterations=3
     # This catches path typos / yaml mistakes / empty-pseudo-label edge cases
     # before they waste real compute time.
+    try:
+        log.info(f"== Starting pseudo-labeling pipeline: {EXRUN_NAME} ==")
 
-    best_hyp = run_hyperparameter_tuning()  # comment out to skip tuning
-    run_pipeline(hyp_overrides=best_hyp)
+        best_hyp = run_hyperparameter_tuning()  # comment out to skip tuning
+        run_pipeline(hyp_overrides=best_hyp)
+    except KeyboardInterrupt:
+        log.warning("Pipeline interrupted by user.")
+    except Exception as e:
+        log.exception(f"Pipeline failed: {e}")
