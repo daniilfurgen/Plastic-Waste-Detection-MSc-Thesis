@@ -11,6 +11,7 @@ from .dataset import (
     sync_pseudo_labels,
 )
 from .engine import PseudoLabelPipeline
+from .eval import evaluate_coco_predictions, fix_prediction_ids
 from .tuner import run_hyperparameter_tuning
 from .utils import (
     RunStateTracker,
@@ -28,6 +29,8 @@ __all__ = [
     "build_round_yaml",
     "build_tuning_subset_yaml",
     "configure_system",
+    "evaluate_coco_predictions",
+    "fix_prediction_ids",
     "load_yaml",
     "log_environment_info",
     "make_pseudo_labels",

@@ -152,6 +152,21 @@ def parse_args() -> argparse.Namespace:
         help="Maximum ratio of pseudo-labeled frames to ground-truth train images.",
     )
 
+    # Evaluation options
+    eval_group = parser.add_argument_group("Evaluation Options")
+    eval_group.add_argument(
+        "--coco-gt",
+        type=str,
+        default=None,
+        help="Path to reference COCO ground truth annotations JSON file.",
+    )
+    eval_group.add_argument(
+        "--coco-eval",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Compute standard COCO metrics (mAP_s, mAP_m, mAP_l, peak F1) each round.",
+    )
+
     # Hyperparameter tuning options
     tune_group = parser.add_argument_group("Hyperparameter Tuning Options")
     tune_group.add_argument(
@@ -240,6 +255,9 @@ def main() -> None:
         config.conf_schedule = list(args.conf)
     if args.max_pseudo_ratio is not None:
         config.max_pseudo_ratio = args.max_pseudo_ratio
+    if args.coco_gt:
+        config.coco_gt_path = Path(args.coco_gt).resolve()
+    config.enable_coco_eval = args.coco_eval
 
     # Apply dry-run configuration if requested
     if args.dry_run:

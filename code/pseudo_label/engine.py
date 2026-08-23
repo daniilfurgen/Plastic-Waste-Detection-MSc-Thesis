@@ -17,6 +17,7 @@ from .dataset import (
     make_pseudo_labels,
     sync_pseudo_labels,
 )
+from .eval import evaluate_coco_predictions
 from .utils import (
     RunStateTracker,
     configure_system,
@@ -243,20 +244,62 @@ class PseudoLabelPipeline:
             f"Evaluating Round {round_idx} on validation split: {self.config.orig_data_yaml}"
         )
         val_model = YOLO(str(best_checkpoint))
-        metrics = val_model.val(data=str(self.config.orig_data_yaml), split="val")
+        val_dir = self.config.pseudo_run_dir / f"round_{round_idx}" / "val"
+        val_kwargs: dict[str, Any] = {
+            "data": str(self.config.orig_data_yaml),
+            "split": "val",
+            "save_json": self.config.enable_coco_eval,
+            "project": str(val_dir.parent),
+            "name": val_dir.name,
+            "exist_ok": True,
+        }
+        if self.config.device is not None:
+            val_kwargs["device"] = self.config.device
+
+        metrics = val_model.val(**val_kwargs)
 
         map50 = float(metrics.box.map50)
         map50_95 = float(metrics.box.map)
         self.logger.info(
-            f"Round {round_idx} Validation Results: mAP50={map50:.4f}, mAP50-95={map50_95:.4f}"
+            f"Round {round_idx} Validation Results (Ultralytics): mAP50={map50:.4f}, mAP50-95={map50_95:.4f}"
         )
 
+        coco_metrics: dict[str, float] = {}
+        if self.config.enable_coco_eval and self.config.coco_gt_path:
+            predictions_json = val_dir / "predictions.json"
+            if predictions_json.exists():
+                try:
+                    coco_metrics = evaluate_coco_predictions(
+                        coco_gt_path=self.config.coco_gt_path,
+                        predictions_path=predictions_json,
+                        fix_ids=True,
+                        default_category_id=0,
+                        logger=self.logger,
+                    )
+                    self.logger.info(
+                        f"Round {round_idx} COCO Metrics: "
+                        f"mAP_50_95={coco_metrics['mAP_50_95']:.4f}, "
+                        f"mAP_50={coco_metrics['mAP_50']:.4f}, "
+                        f"mAP_s={coco_metrics['mAP_s']:.4f}, "
+                        f"mAP_m={coco_metrics['mAP_m']:.4f}, "
+                        f"mAP_l={coco_metrics['mAP_l']:.4f}, "
+                        f"peak_f1={coco_metrics['peak_f1']:.4f}"
+                    )
+                except Exception as e:
+                    self.logger.warning(f"COCO evaluation failed for Round {round_idx}: {e}")
+            else:
+                self.logger.warning(
+                    f"predictions.json not found at {predictions_json}; skipping COCO evaluation."
+                )
+
         # Record metrics in state tracker
+        extra_metrics = {"coco": coco_metrics} if coco_metrics else None
         self.state_tracker.record_round(
             round_idx=round_idx,
             weights=str(best_checkpoint),
             mAP50=map50,
             mAP50_95=map50_95,
+            extra=extra_metrics,
         )
 
         # Generate pseudo-labels for subsequent round if within budget
@@ -279,12 +322,15 @@ class PseudoLabelPipeline:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        return {
+        result_row: dict[str, Any] = {
             "round": round_idx,
             "weights": str(best_checkpoint),
             "mAP50": map50,
             "mAP50_95": map50_95,
         }
+        if coco_metrics:
+            result_row["coco"] = coco_metrics
+        return result_row
 
     def run(
         self,

@@ -50,6 +50,10 @@ class PipelineConfig:
     max_pseudo_ratio: float = 1.0  # Max ratio of pseudo-labeled images to real images
     seed: int = 42
 
+    # Evaluation parameters
+    coco_gt_path: Path | None = field(default_factory=lambda: Path("data/flow_img/val/annotations.json"))
+    enable_coco_eval: bool = True  # Compute standard COCO metrics (mAP_s, mAP_m, mAP_l, etc.)
+
     # Hyperparameter tuning parameters
     tune_fraction: float = 0.10  # Fraction of train images used for tuning
     tune_seed: int = 42
@@ -69,6 +73,8 @@ class PipelineConfig:
         self.pseudo_run_dir = self._resolve(self.pseudo_run_dir)
         self.tune_run_dir = self._resolve(self.tune_run_dir)
         self.log_file = self._resolve(self.log_file)
+        if self.coco_gt_path is not None:
+            self.coco_gt_path = self._resolve(self.coco_gt_path)
 
         if not self.conf_schedule:
             self.conf_schedule = [0.85]
@@ -129,6 +135,7 @@ class PipelineConfig:
             "pseudo_run_dir",
             "tune_run_dir",
             "log_file",
+            "coco_gt_path",
         }
         for k in path_keys:
             if k in raw_data and raw_data[k] is not None:
