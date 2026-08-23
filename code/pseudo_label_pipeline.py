@@ -55,6 +55,9 @@ import torch
 
 torch.backends.cudnn.benchmark = False
 
+# Configure the name of the experiment run.
+EXRUN_NAME = "YOLO26m-P2-SSL w/ pretrained weights (10 rounds)"
+
 # Configure paths relative to the repo root.
 ROOT = Path.cwd().resolve()
 ORIG_DATA_YAML = ROOT / "data" / "flow_img.yaml"
@@ -63,7 +66,7 @@ VIDEO_IMAGES_DIR = ROOT / "data" / "video_frames" / "images" / "all"
 VIDEO_LABELS_DIR = ROOT / "data" / "video_frames" / "labels" / "all"
 
 RUNS_DIR = ROOT / "runs"
-PSEUDO_RUN_DIR = RUNS_DIR / "pseudo"
+PSEUDO_RUN_DIR = RUNS_DIR / "pseudo" / "yolo26m-p2-10-rounds"
 TUNE_RUN_DIR = RUNS_DIR / "tune"
 
 # Configure the YOLO26 model size and whether to use the P2 small-object detection head.
@@ -74,12 +77,9 @@ P2_HEAD = True  # use P2 small-object detection head (yolo26*-p2.yaml/.pt)
 BASE_CONFIGURATION = f"yolo26{SIZE}-p2.yaml" if P2_HEAD else f"yolo26{SIZE}.yaml"
 PRETRAINED_WEIGHTS = f"yolo26{SIZE}.pt"
 
-# Configure the name of the experiment run.
-EXRUN_NAME = "YOLO26m-P2-SSL w/ pretrained weights"
-
 BATCH = 10  # Optimal batch size benchmarked for RTX 4070 (12GB) to avoid RAM spillover
 WORKERS = 4  # DataLoader workers
-N_ROUNDS = 3
+N_ROUNDS = 10
 EPOCHS_PER_ROUND = 150
 PATIENCE = 25  # early stopping -- avoids burning unattended hours on a plateau
 IMG_SIZE = 640  # higher than the 640 default helps small floating debris
@@ -404,7 +404,10 @@ if __name__ == "__main__":
     try:
         log.info(f"== Starting pseudo-labeling pipeline: {EXRUN_NAME} ==")
 
-        best_hyp = run_hyperparameter_tuning()  # comment out to skip tuning
+        # best_hyp = run_hyperparameter_tuning()  # comment out to skip tuning
+        best_hyp = yaml.safe_load(
+            (TUNE_RUN_DIR / "evolve-6" / "best_hyperparameters.yaml").read_text()
+        )
         run_pipeline(hyp_overrides=best_hyp)
     except KeyboardInterrupt:
         log.warning("Pipeline interrupted by user.")
