@@ -34,7 +34,9 @@ def fix_prediction_ids(
         coco_gt = json.load(f)
 
     img_name_to_id = {img["file_name"]: img["id"] for img in coco_gt.get("images", [])}
-    stem_to_id = {Path(img["file_name"]).stem: img["id"] for img in coco_gt.get("images", [])}
+    stem_to_id = {
+        Path(img["file_name"]).stem: img["id"] for img in coco_gt.get("images", [])
+    }
 
     for pred in predictions:
         pred["category_id"] = default_category_id
@@ -85,7 +87,9 @@ def evaluate_coco_predictions(
         preds = json.load(f)
 
     if not preds:
-        log.warning(f"No predictions found in {pred_path}; returning zeroed COCO metrics.")
+        log.warning(
+            f"No predictions found in {pred_path}; returning zeroed COCO metrics."
+        )
         return {
             "mAP_50_95": 0.0,
             "mAP_50": 0.0,

@@ -86,9 +86,7 @@ def make_pseudo_labels(
     log = logger or logging.getLogger("pseudo_pipeline")
     predict_dir.mkdir(parents=True, exist_ok=True)
 
-    log.info(
-        f"Generating pseudo-labels on {video_images_dir} with conf>={conf:.2f}..."
-    )
+    log.info(f"Generating pseudo-labels on {video_images_dir} with conf>={conf:.2f}...")
 
     results = model.predict(
         source=str(video_images_dir),
@@ -139,8 +137,7 @@ def build_round_yaml(
 
     # Find pseudo images that have corresponding label txt files
     pseudo_imgs = [
-        video_images_dir / f"{p.stem}.jpg"
-        for p in video_labels_dir.glob("*.txt")
+        video_images_dir / f"{p.stem}.jpg" for p in video_labels_dir.glob("*.txt")
     ]
     pseudo_imgs = [p for p in pseudo_imgs if p.exists()]
 
@@ -158,7 +155,9 @@ def build_round_yaml(
 
     # Write round data.yaml
     round_cfg = dict(orig_cfg)
-    round_cfg["train"] = str(merged_list_path)  # Point train to merged list; val is untouched
+    round_cfg["train"] = str(
+        merged_list_path
+    )  # Point train to merged list; val is untouched
     round_yaml_path = round_dir / "data.yaml"
     save_yaml(round_cfg, round_yaml_path)
 

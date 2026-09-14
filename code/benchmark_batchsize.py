@@ -175,7 +175,9 @@ def _worker_train_test(
         elif isinstance(train_count, str) and Path(train_count).exists():
             p = Path(train_count)
             if p.is_file():
-                num_images = len([line for line in p.read_text().splitlines() if line.strip()])
+                num_images = len(
+                    [line for line in p.read_text().splitlines() if line.strip()]
+                )
             elif p.is_dir():
                 num_images = len(list(p.rglob("*.jpg")) + list(p.rglob("*.png")))
 
@@ -245,7 +247,9 @@ def _worker_train_test(
         )
 
 
-def run_benchmark_for_batch(config: dict[str, Any], timeout_s: int = 300) -> dict[str, Any]:
+def run_benchmark_for_batch(
+    config: dict[str, Any], timeout_s: int = 300
+) -> dict[str, Any]:
     """Run single batch test in isolated process with safety timeout and queue collection."""
     ctx = mp.get_context("spawn")
     result_queue = ctx.Queue()

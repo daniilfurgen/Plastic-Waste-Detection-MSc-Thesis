@@ -21,12 +21,18 @@ class PipelineConfig:
 
     # Dataset paths (relative to root_dir unless absolute)
     orig_data_yaml: Path = field(default_factory=lambda: Path("data/flow_img.yaml"))
-    video_images_dir: Path = field(default_factory=lambda: Path("data/video_frames/images/all"))
-    video_labels_dir: Path = field(default_factory=lambda: Path("data/video_frames/labels/all"))
+    video_images_dir: Path = field(
+        default_factory=lambda: Path("data/video_frames/images/all")
+    )
+    video_labels_dir: Path = field(
+        default_factory=lambda: Path("data/video_frames/labels/all")
+    )
 
     # Output run directories
     runs_dir: Path = field(default_factory=lambda: Path("runs"))
-    pseudo_run_dir: Path = field(default_factory=lambda: Path("runs/pseudo/yolo26m-p2-ssl"))
+    pseudo_run_dir: Path = field(
+        default_factory=lambda: Path("runs/pseudo/yolo26m-p2-ssl")
+    )
     tune_run_dir: Path = field(default_factory=lambda: Path("runs/tune"))
     log_file: Path = field(default_factory=lambda: Path("pipeline.log"))
 
@@ -51,8 +57,12 @@ class PipelineConfig:
     seed: int = 42
 
     # Evaluation parameters
-    coco_gt_path: Path | None = field(default_factory=lambda: Path("data/flow_img/val/annotations.json"))
-    enable_coco_eval: bool = True  # Compute standard COCO metrics (mAP_s, mAP_m, mAP_l, etc.)
+    coco_gt_path: Path | None = field(
+        default_factory=lambda: Path("data/flow_img/val/annotations.json")
+    )
+    enable_coco_eval: bool = (
+        True  # Compute standard COCO metrics (mAP_s, mAP_m, mAP_l, etc.)
+    )
 
     # Hyperparameter tuning parameters
     tune_fraction: float = 0.10  # Fraction of train images used for tuning
@@ -87,7 +97,11 @@ class PipelineConfig:
         """Return the base YAML model architecture configuration."""
         if self.base_configuration:
             return self.base_configuration
-        return f"yolo26{self.model_size}-p2.yaml" if self.p2_head else f"yolo26{self.model_size}.yaml"
+        return (
+            f"yolo26{self.model_size}-p2.yaml"
+            if self.p2_head
+            else f"yolo26{self.model_size}.yaml"
+        )
 
     def get_pretrained_weights(self) -> str:
         """Return the initial pre-trained checkpoint filename or path."""

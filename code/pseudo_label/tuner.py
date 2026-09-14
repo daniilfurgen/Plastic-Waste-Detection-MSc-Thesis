@@ -67,8 +67,12 @@ def run_hyperparameter_tuning(
         best_hyp_candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         best_hyp_path = best_hyp_candidates[0]
         best_hyp = load_yaml(best_hyp_path)
-        log.info(f"Tuning complete. Best hyperparameters loaded from {best_hyp_path}: {best_hyp}")
+        log.info(
+            f"Tuning complete. Best hyperparameters loaded from {best_hyp_path}: {best_hyp}"
+        )
         return best_hyp
 
-    log.warning("No best_hyperparameters.yaml found after tuning; returning empty dictionary.")
+    log.warning(
+        "No best_hyperparameters.yaml found after tuning; returning empty dictionary."
+    )
     return {}

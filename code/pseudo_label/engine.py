@@ -102,7 +102,9 @@ class PseudoLabelPipeline:
             return self.config.orig_data_yaml
 
         prev_round = round_idx - 1
-        prev_predict_dir = self.config.pseudo_run_dir / f"round_{prev_round}" / "predict"
+        prev_predict_dir = (
+            self.config.pseudo_run_dir / f"round_{prev_round}" / "predict"
+        )
         prev_labels_dir = prev_predict_dir / "labels"
 
         # If previous round pseudo-labels are missing, generate them on the fly
@@ -286,7 +288,9 @@ class PseudoLabelPipeline:
                         f"peak_f1={coco_metrics['peak_f1']:.4f}"
                     )
                 except Exception as e:
-                    self.logger.warning(f"COCO evaluation failed for Round {round_idx}: {e}")
+                    self.logger.warning(
+                        f"COCO evaluation failed for Round {round_idx}: {e}"
+                    )
             else:
                 self.logger.warning(
                     f"predictions.json not found at {predictions_json}; skipping COCO evaluation."
@@ -390,7 +394,9 @@ class PseudoLabelPipeline:
         try:
             for round_idx in range(start_round, end_round + 1):
                 # Pass resume_mid_round only to the first round being executed if relevant
-                allow_mid_resume = resume_mid_round if round_idx == start_round else False
+                allow_mid_resume = (
+                    resume_mid_round if round_idx == start_round else False
+                )
                 self.execute_round(
                     round_idx=round_idx,
                     hyp_overrides=merged_hyp,
@@ -398,7 +404,9 @@ class PseudoLabelPipeline:
                 )
 
             summary = self.state_tracker.load_summary()
-            self.logger.info(f"Pipeline session completed successfully. Summary: {summary}")
+            self.logger.info(
+                f"Pipeline session completed successfully. Summary: {summary}"
+            )
             return summary
 
         except KeyboardInterrupt:
