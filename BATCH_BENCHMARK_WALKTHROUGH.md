@@ -19,15 +19,15 @@
 
 Tested on **NVIDIA GeForce RTX 4070 SUPER (12.0 GB VRAM)**, **AMD Ryzen 7 5700X**, **24 GB System RAM** with `yolo26m-p2.yaml` (P2 small-object head) at `imgsz=640` on [`data/flow_img.yaml`](data/flow_img.yaml):
 
-| Batch Size | Speed (img/s) | Epoch Time (s) | Step Latency (ms) | Peak VRAM | VRAM % | Host RAM | Status |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| **4** | 25.0 | 48.05 | 160.2 | 3,990 MB | 32.5% | 10.7 GB | ✅ OK |
-| **6** | 31.5 | 38.08 | 190.4 | 5,558 MB | 45.3% | 11.3 GB | ✅ OK |
-| **8** | 33.5 | 35.86 | 239.1 | 7,238 MB | 58.9% | 11.3 GB | ✅ OK |
-| **10** | **35.6** | **33.68** | **280.7** | **8,898 MB** | **72.5%** | **11.4 GB** | ✅ **Optimal** |
-| **12** | 34.3 | 34.95 | 349.5 | 10,522 MB | 85.7% | 12.0 GB | ✅ OK |
-| **14** | 0.0 | N/A | N/A | > 12,282 MB | > 100% | Spills to RAM | ❌ Timeout / Thrashing |
-| **16** | 0.0 | N/A | N/A | > 12,282 MB | > 100% | Spills to RAM | ❌ Timeout / Thrashing |
+| Batch Size | Speed (img/s) | Epoch Time (s) | Step Latency (ms) |  Peak VRAM   |  VRAM %   |   Host RAM    |         Status         |
+| :--------: | :-----------: | :------------: | :---------------: | :----------: | :-------: | :-----------: | :--------------------: |
+|   **4**    |     25.0      |     48.05      |       160.2       |   3,990 MB   |   32.5%   |    10.7 GB    |         ✅ OK          |
+|   **6**    |     31.5      |     38.08      |       190.4       |   5,558 MB   |   45.3%   |    11.3 GB    |         ✅ OK          |
+|   **8**    |     33.5      |     35.86      |       239.1       |   7,238 MB   |   58.9%   |    11.3 GB    |         ✅ OK          |
+|   **10**   |   **35.6**    |   **33.68**    |     **280.7**     | **8,898 MB** | **72.5%** |  **11.4 GB**  |     ✅ **Optimal**     |
+|   **12**   |     34.3      |     34.95      |       349.5       |  10,522 MB   |   85.7%   |    12.0 GB    |         ✅ OK          |
+|   **14**   |      0.0      |      N/A       |        N/A        | > 12,282 MB  |  > 100%   | Spills to RAM | ❌ Timeout / Thrashing |
+|   **16**   |      0.0      |      N/A       |        N/A        | > 12,282 MB  |  > 100%   | Spills to RAM | ❌ Timeout / Thrashing |
 
 > [!IMPORTANT]
 > **Root Cause Analysis of System RAM Spillover**:
