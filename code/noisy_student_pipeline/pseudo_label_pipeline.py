@@ -26,10 +26,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from pseudo_label.config import PipelineConfig
-from pseudo_label.engine import PseudoLabelPipeline
-from pseudo_label.tuner import run_hyperparameter_tuning
-from pseudo_label.utils import load_yaml, setup_logging
+from code.noisy_student_pipeline.pseudo_label.config import PipelineConfig
+from code.noisy_student_pipeline.pseudo_label.engine import PseudoLabelPipeline
+from code.noisy_student_pipeline.pseudo_label.tuner import run_hyperparameter_tuning
+from code.noisy_student_pipeline.pseudo_label.utils import load_yaml, setup_logging
 
 
 def parse_args() -> argparse.Namespace:
