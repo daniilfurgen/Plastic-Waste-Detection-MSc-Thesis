@@ -7,6 +7,9 @@ This repository contains the Master's Thesis project of Daniil Sanzharov. The re
 - `code/`: Python scripts and Jupyter notebooks for training and evaluating Computer Vision models.
   - Primary models: YOLO26 (via Ultralytics).
   - Dataset: FloW-img (locally stored in `code/FloW-img/`, git-ignored).
+  - `ssod/`: Semi-Supervised Object Detection (SSOD) pipeline components.
+    - `pseudo_labeling.py`: High-throughput pseudo-label generator featuring 2-view candidate inference (native + SIMD horizontal flip), batched FP16 Tensor Core execution with multi-threaded I/O prefetching, Polars candidate aggregation, Parquet export, COCO size-bin ground thresholding, clean-slate annotation cleanup, and Typer CLI.
+    - `utilities.py`: Project-wide structured logging (`get_logger`) and shared utilities.
 - `paper/`: Raw Typst files for the thesis paper and conference abstracts.
   - `ВКР-Магістр-Санжаров.typ`: Main thesis document.
   - `sources.bib`: Bibliography in BibLaTeX format.
@@ -16,7 +19,7 @@ This repository contains the Master's Thesis project of Daniil Sanzharov. The re
 
 - **Environment Management:** [uv](https://github.com/astral-sh/uv). Use `uv` for all dependency management and execution.
 - **Python Version:** 3.12+
-- **Core Dependencies:** `ultralytics`, `supervision`, `torch`, `torchvision`, `onnxruntime-gpu`.
+- **Core Dependencies:** `ultralytics`, `supervision`, `torch`, `torchvision`, `polars`, `typer`, `onnxruntime-gpu`.
 - **Document Generation:** Typst.
 
 ## Licensing
