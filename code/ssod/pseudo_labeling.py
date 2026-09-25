@@ -1,12 +1,12 @@
+from concurrent.futures import ThreadPoolExecutor
 import logging
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
+import cv2
 import numpy as np
 import polars as pl
 import torch
-import torch.nn.functional as F
-from torchvision.io import ImageReadMode, read_image  # type: ignore[import-untyped]
 from torchvision.ops import batched_nms  # type: ignore[import-untyped]
 from tqdm import tqdm  # type: ignore[import-untyped]
 import typer
@@ -30,26 +30,14 @@ app = typer.Typer(
 )
 
 
-def _hflip(image: torch.Tensor) -> torch.Tensor:
-    if image.ndim != 3:
-        raise ValueError("image must be a single CHW tensor")
-    return image.flip(-1)
-
-
-def _upscale(image: torch.Tensor, factor: float = 2) -> torch.Tensor:
-    if image.ndim != 3:
-        raise ValueError("image must be a single CHW tensor")
-    if factor <= 0:
-        raise ValueError("factor must be positive")
-
-    height, width = image.shape[-2:]
-    size = (round(height * factor), round(width * factor))
-    return F.interpolate(
-        image.unsqueeze(0),
-        size=size,
-        mode="bilinear",
-        align_corners=False,
-    ).squeeze(0)
+def _hflip(image: torch.Tensor | np.ndarray) -> torch.Tensor | np.ndarray:
+    if isinstance(image, torch.Tensor):
+        if image.ndim != 3:
+            raise ValueError("image must be a single CHW tensor")
+        return image.flip(-1)
+    elif isinstance(image, np.ndarray):
+        return cv2.flip(image, 1)
+    raise TypeError(f"Unsupported image type: {type(image)}")
 
 
 def _inverse_transform(preds: Any, name: str) -> list[dict[str, Any]]:
@@ -123,10 +111,13 @@ def ground_threshold(
     hi: float = 1.0,
     n_bins: int = 21,
 ) -> float:
-    if len(scores) == 0:
-        return hi
-    hist, edges = np.histogram(scores, bins=n_bins, range=(lo, hi))
-    return float(edges[np.argmin(hist)])
+    hist, bin_edges = np.histogram(scores, bins=n_bins, range=(lo, hi))
+
+    left_max_index = np.argmax(hist[: len(hist) // 2])
+    right_max_index = np.argmax(hist[len(hist) // 2 :]) + len(hist) // 2
+
+    local_min_index = np.argmin(hist[left_max_index:right_max_index]) + left_max_index
+    return float(bin_edges[local_min_index])
 
 
 def generate_candidates_multiview(
@@ -134,42 +125,35 @@ def generate_candidates_multiview(
     image: torch.Tensor | np.ndarray | str | Path,
     conf: float = 0.001,
     iou_threshold: float = 0.5,
+    half: bool = True,
     device: str | torch.device | None = None,
 ) -> list[dict[str, Any]]:
-    """One unlabeled image -> aggregated candidate boxes via 4 views."""
+    """One unlabeled image -> aggregated candidate boxes via 2 views (normal and flip)."""
     if isinstance(image, (str, Path)):
-        image_tensor = read_image(str(image), mode=ImageReadMode.RGB)
+        img_np = cv2.imread(str(image))
+        if img_np is None:
+            raise FileNotFoundError(f"Failed to read image at {image}")
     elif isinstance(image, np.ndarray):
-        if image.ndim == 3 and image.shape[2] in {1, 3, 4}:
-            image_tensor = torch.from_numpy(image).permute(2, 0, 1)
-        else:
-            image_tensor = torch.from_numpy(image)
+        img_np = image
     elif isinstance(image, torch.Tensor):
         if image.ndim == 4 and image.shape[0] == 1:
-            image_tensor = image.squeeze(0)
-        else:
-            image_tensor = image
+            image = image.squeeze(0)
+        img_np = image.permute(1, 2, 0).cpu().numpy()
     else:
         raise TypeError(f"Unsupported image type: {type(image)}")
 
-    if image_tensor.ndim != 3:
-        raise ValueError(
-            f"image must be a single CHW tensor, got shape {tuple(image_tensor.shape)}"
-        )
-
     views = {
-        "normal": image_tensor,
-        "flip": _hflip(image_tensor),
-        "scale": _upscale(image_tensor, factor=2),
-        "flip_scale": _upscale(_hflip(image_tensor), factor=2),
+        "normal": img_np,
+        "flip": cv2.flip(img_np, 1),
     }
 
     raw_preds = {}
-    for name, view_tensor in views.items():
-        # Pass HWC numpy arrays to allow Ultralytics LoadPilAndNumpy to letterbox/pad
-        # dimensions not divisible by 32 and scale predictions back to view_tensor's shape.
-        view_np = view_tensor.permute(1, 2, 0).cpu().numpy()
-        predict_kwargs: dict[str, Any] = {"conf": conf, "verbose": False}
+    for name, view_np in views.items():
+        predict_kwargs: dict[str, Any] = {
+            "conf": conf,
+            "half": half,
+            "verbose": False,
+        }
         if device is not None:
             predict_kwargs["device"] = device
         preds = teacher_model.predict(view_np, **predict_kwargs)
@@ -256,13 +240,16 @@ def clean_dataset_annotations(
 
 class PseudoLabelGenerator:
     """
-    Generates pseudo-labels for unlabeled images using multi-view candidate inference
+    Generates pseudo-labels for unlabeled images using batched multi-view candidate inference
     and COCO size-bin ground thresholding.
     """
 
     def __init__(
         self,
         teacher_model: YOLO | str | Path,
+        batch_size: int = 32,
+        half: bool = True,
+        workers: int = 4,
         conf: float = 0.001,
         iou_threshold: float = 0.5,
         device: str | torch.device | None = None,
@@ -273,6 +260,9 @@ class PseudoLabelGenerator:
         else:
             self.model = teacher_model
 
+        self.batch_size = max(1, batch_size)
+        self.half = half
+        self.workers = max(1, workers)
         self.conf = conf
         self.iou_threshold = iou_threshold
         self.device = device
@@ -288,7 +278,7 @@ class PseudoLabelGenerator:
         """
         Run full pseudo-labeling pipeline:
         1. Clean existing annotations in labels_dir and stale caches.
-        2. Generate candidates for all images using multi-view inference.
+        2. Generate candidates for all images using batched multi-view inference.
         3. Collect candidates into Polars DataFrame.
         4. Optionally export raw candidates to Parquet.
         5. Compute optimal ground threshold per COCO size bin.
@@ -323,7 +313,7 @@ class PseudoLabelGenerator:
                 "filtered_df": pl.DataFrame(),
             }
 
-        # 2. Extract multi-view candidates across all images
+        # 2. Extract multi-view candidates across all images using batched inference
         records: dict[str, list[Any]] = {
             "image_stem": [],
             "label_path": [],
@@ -340,37 +330,71 @@ class PseudoLabelGenerator:
             "size_bin": [],
         }
 
-        self.logger.info("Running multi-view candidate inference...")
-        for img_path in tqdm(image_files, desc="Multi-view Inference"):
-            rel_path = img_path.relative_to(resolved_img_dir)
-            target_label = resolved_lbl_dir / rel_path.with_suffix(".txt")
+        self.logger.info(
+            f"Running multi-view candidate inference (batch_size={self.batch_size}, "
+            f"half={self.half}, workers={self.workers})..."
+        )
 
-            img_tensor = read_image(str(img_path), mode=ImageReadMode.RGB)
-            img_height, img_width = img_tensor.shape[-2:]
+        chunks = [
+            image_files[i : i + self.batch_size]
+            for i in range(0, len(image_files), self.batch_size)
+        ]
 
-            candidates = generate_candidates_multiview(
-                teacher_model=self.model,
-                image=img_tensor,
-                conf=self.conf,
-                iou_threshold=self.iou_threshold,
-                device=self.device,
-            )
+        total_batches = len(chunks)
+        with ThreadPoolExecutor(max_workers=self.workers) as pool:
+            with tqdm(total=len(image_files), desc="Multi-view Inference") as pbar:
+                for chunk_paths in chunks:
+                    # Parallel image decode via thread pool
+                    cv_imgs = list(pool.map(lambda p: cv2.imread(str(p)), chunk_paths))
+                    # AVX2 SIMD flip
+                    cv_flipped = list(pool.map(lambda im: cv2.flip(im, 1), cv_imgs))
 
-            for cand in candidates:
-                sb = assign_size_bin(cand["w"], cand["h"])
-                records["image_stem"].append(img_path.stem)
-                records["label_path"].append(str(target_label))
-                records["img_width"].append(img_width)
-                records["img_height"].append(img_height)
-                records["class_id"].append(cand["class"])
-                records["score"].append(cand["score"])
-                records["x1"].append(cand["box"][0])
-                records["y1"].append(cand["box"][1])
-                records["x2"].append(cand["box"][2])
-                records["y2"].append(cand["box"][3])
-                records["w"].append(cand["w"])
-                records["h"].append(cand["h"])
-                records["size_bin"].append(sb)
+                    predict_kwargs: dict[str, Any] = {
+                        "batch": len(chunk_paths),
+                        "half": self.half,
+                        "conf": self.conf,
+                        "verbose": False,
+                    }
+                    if self.device is not None:
+                        predict_kwargs["device"] = self.device
+
+                    preds_norm = self.model.predict(cv_imgs, **predict_kwargs)
+                    preds_flip = self.model.predict(cv_flipped, **predict_kwargs)
+
+                    for j, img_path in enumerate(chunk_paths):
+                        im = cv_imgs[j]
+                        if im is None:
+                            continue
+                        img_height, img_width = im.shape[:2]
+
+                        rel_path = img_path.relative_to(resolved_img_dir)
+                        target_label = resolved_lbl_dir / rel_path.with_suffix(".txt")
+
+                        raw = [
+                            _inverse_transform([preds_norm[j]], "normal"),
+                            _inverse_transform([preds_flip[j]], "flip"),
+                        ]
+                        candidates = _nms_aggregate(
+                            raw, iou_threshold=self.iou_threshold
+                        )
+
+                        for cand in candidates:
+                            sb = assign_size_bin(cand["w"], cand["h"])
+                            records["image_stem"].append(img_path.stem)
+                            records["label_path"].append(str(target_label))
+                            records["img_width"].append(img_width)
+                            records["img_height"].append(img_height)
+                            records["class_id"].append(cand["class"])
+                            records["score"].append(cand["score"])
+                            records["x1"].append(cand["box"][0])
+                            records["y1"].append(cand["box"][1])
+                            records["x2"].append(cand["box"][2])
+                            records["y2"].append(cand["box"][3])
+                            records["w"].append(cand["w"])
+                            records["h"].append(cand["h"])
+                            records["size_bin"].append(sb)
+
+                    pbar.update(len(chunk_paths))
 
         candidates_df = pl.DataFrame(
             records,
@@ -393,7 +417,7 @@ class PseudoLabelGenerator:
 
         total_candidates = len(candidates_df)
         self.logger.info(
-            f"Extracted {total_candidates} total multi-view candidate detections."
+            f"Extracted {total_candidates} total multi-view candidate detections across {total_batches} batches."
         )
 
         # 3. Save raw candidates to Parquet if specified
@@ -504,6 +528,9 @@ def generate_pseudo_labels(
     labels: Path | str | None = None,
     save_candidates_path: Path | str | None = None,
     max_images: int | None = None,
+    batch_size: int = 32,
+    half: bool = True,
+    workers: int = 4,
     conf: float = 0.001,
     iou: float = 0.5,
     device: str | torch.device | None = None,
@@ -512,6 +539,9 @@ def generate_pseudo_labels(
     """Functional convenience wrapper for PseudoLabelGenerator."""
     generator = PseudoLabelGenerator(
         teacher_model=model,
+        batch_size=batch_size,
+        half=half,
+        workers=workers,
         conf=conf,
         iou_threshold=iou,
         device=device,
@@ -566,6 +596,25 @@ def main(
         help="Maximum number of images to process (useful for test runs).",
         min=1,
     ),
+    batch_size: int = typer.Option(
+        32,
+        "--batch-size",
+        "-b",
+        help="Inference batch size.",
+        min=1,
+    ),
+    half: bool = typer.Option(
+        True,
+        "--half/--no-half",
+        help="Use FP16 half-precision inference on GPU.",
+    ),
+    workers: int = typer.Option(
+        4,
+        "--workers",
+        "-w",
+        help="Number of worker threads for parallel I/O and SIMD transforms.",
+        min=1,
+    ),
     conf: float = typer.Option(
         0.001,
         "--conf",
@@ -595,6 +644,9 @@ def main(
         labels=labels,
         save_candidates_path=save_candidates,
         max_images=max_images,
+        batch_size=batch_size,
+        half=half,
+        workers=workers,
         conf=conf,
         iou=iou,
         device=device,
