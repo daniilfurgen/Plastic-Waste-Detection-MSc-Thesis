@@ -8,8 +8,12 @@ This repository contains the Master's Thesis project of Daniil Sanzharov. The re
   - Primary models: YOLO26 (via Ultralytics).
   - Dataset: FloW-img (locally stored in `code/FloW-img/`, git-ignored).
   - `ssod/`: Semi-Supervised Object Detection (SSOD) pipeline components.
+    - `dataset.py`: Dual dataset handler (`SSODDatasetHandler`) and epoch-aware sampler (`SSODSampler`). Supports simultaneous loading of annotated Ground-Truth (train & val) and dynamic Pseudo-Labeled pools, strict selective augmentations (HSV, scale, translate, fliplr on both; Mosaic on GT only, automatically closed during the last 10% of epochs; all other augmentations disabled), dynamic in-memory / disk pseudo-label reloading, 25% GT tail / 75% GT+PL head epoch sequencing, and `is_pseudo` batch collation.
+    - `mean_teacher.py`: Semi-supervised Mean Teacher training pipeline (`MeanTeacherTrainer`). Supports supervised warm-up on Ground-Truth data, initializing Student from Teacher weights, per-step Teacher EMA updates, Student training using YOLO default detection loss (with optional unsupervised weighting $\lambda_u$), per-epoch Teacher evaluation on GT validation split logging Ultralytics and COCO metrics, and checkpoint selection via Ultralytics fitness. Includes Typer CLI.
+    - `metrics.py`: Standalone COCO evaluation and prediction ID harmonization module (`evaluate_coco`, `fix_prediction_ids`) computing multi-scale AP (`mAP_s`, `mAP_m`, `mAP_l`), AR, and peak $F_1$ score via `pycocotools.cocoeval`.
     - `pseudo_labeling.py`: High-throughput pseudo-label generator featuring 2-view candidate inference (native + SIMD horizontal flip), batched FP16 Tensor Core execution with multi-threaded I/O prefetching, Polars candidate aggregation, Parquet export, COCO size-bin ground thresholding, clean-slate annotation cleanup, and Typer CLI.
     - `utilities.py`: Project-wide structured logging (`get_logger`) and shared utilities.
+- `tests/`: Automated unit and integration test suite covering SSOD augmentations, samplers, EMA updates, loss functions, COCO evaluation, and dataset lifecycles.
 - `paper/`: Raw Typst files for the thesis paper and conference abstracts.
   - `ВКР-Магістр-Санжаров.typ`: Main thesis document.
   - `sources.bib`: Bibliography in BibLaTeX format.
