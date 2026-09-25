@@ -91,6 +91,7 @@ class MeanTeacherConfig:
     pseudo_conf: float = 0.001
     pseudo_iou: float = 0.5
     pseudo_half: bool = True
+    max_pseudo_images: int | None = None
 
     # Logging and output
     runs_dir: Path = field(default_factory=lambda: Path("runs/mean_teacher"))
@@ -440,6 +441,7 @@ class MeanTeacherTrainer:
             gen_out = pseudo_generator.generate(
                 images_dir=self.config.pl_images_dir,
                 labels_dir=self.config.pl_labels_dir,
+                max_images=self.config.max_pseudo_images,
             )
             dataset_handler.reload_pseudo_labels(filtered_df=gen_out.get("filtered_df"))
 
@@ -598,6 +600,7 @@ def main(
     device: Optional[str] = typer.Option(None, "--device", help="PyTorch device."),
     ema_decay: float = typer.Option(0.999, "--ema-decay", help="Teacher EMA decay per step."),
     unsupervised_weight: float = typer.Option(1.0, "--unsupervised-weight", help="Weight lambda_u for pseudo loss."),
+    max_pseudo_images: Optional[int] = typer.Option(None, "--max-pseudo-images", help="Max unlabeled images for pseudo-labeling."),
     project: Path = typer.Option(Path("runs/mean_teacher"), "--project", help="Output project directory."),
     name: str = typer.Option("exp", "--name", help="Experiment name."),
 ) -> None:
@@ -617,6 +620,7 @@ def main(
         device=device,
         ema_decay=ema_decay,
         unsupervised_weight=unsupervised_weight,
+        max_pseudo_images=max_pseudo_images,
         runs_dir=project,
         experiment_name=name,
     )
