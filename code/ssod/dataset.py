@@ -80,7 +80,7 @@ def build_gt_transforms(
 ) -> Compose:
     """
     Build transforms for Ground-Truth training dataset.
-    
+
     Includes Mosaic (if mosaic=True), Scale & Translate (RandomPerspective),
     RandomHSV, and RandomFlip(fliplr).
     All other augmentations are disabled.
@@ -128,7 +128,7 @@ def build_pseudo_transforms(
 ) -> Compose:
     """
     Build transforms for Pseudo-Labeled training dataset.
-    
+
     Mosaic is NEVER included. Includes Scale & Translate (RandomPerspective),
     RandomHSV, and RandomFlip(fliplr). All other augmentations disabled.
     """
@@ -236,9 +236,7 @@ class PseudoYOLODataset(YOLODataset):
             ]
         )
 
-    def _load_labels_from_disk(
-        self, filter_empty: bool = True
-    ) -> list[dict[str, Any]]:
+    def _load_labels_from_disk(self, filter_empty: bool = True) -> list[dict[str, Any]]:
         img_files = self._find_image_files()
         labels_list: list[dict[str, Any]] = []
         im_files_list: list[str] = []
@@ -339,7 +337,11 @@ class PseudoYOLODataset(YOLODataset):
 
         detected_stems = set()
         for keys, group_df in df.group_by("image_stem"):
-            stem = keys[0] if isinstance(keys, tuple) else (keys if isinstance(keys, str) else group_df["image_stem"][0])
+            stem = (
+                keys[0]
+                if isinstance(keys, tuple)
+                else (keys if isinstance(keys, str) else group_df["image_stem"][0])
+            )
 
             img_path = all_imgs.get(stem)
             if img_path is None:
@@ -420,7 +422,7 @@ class PseudoYOLODataset(YOLODataset):
 class SSODSampler(Sampler[int]):
     """
     Epoch-aware sampler for Semi-Supervised Object Detection (SSOD).
-    
+
     Each epoch:
       1. Uniformly select 25% of GT items (without replacement) to place at the tail.
       2. The remaining 75% of GT items are mixed and shuffled with all pseudo-labeled items.
@@ -504,7 +506,7 @@ class SSODSampler(Sampler[int]):
 class SSODDataset(Dataset):
     """
     Combined PyTorch Dataset for SSOD training.
-    
+
     Wraps Ground-Truth dataset and Pseudo-Labeled dataset, coordinating
     separate augmentation pipelines (Mosaic on GT, no Mosaic on Pseudo),
     dynamic pseudo-label reloading, and sample source tracking (`is_pseudo`).
@@ -602,7 +604,7 @@ class SSODDataset(Dataset):
 class SSODDatasetHandler:
     """
     High-level orchestrator for SSOD datasets and dataloaders in Mean Teacher training.
-    
+
     Coordinates:
     - GT Train dataset & GT Val dataset
     - Pseudo-labeled Train dataset
@@ -784,7 +786,9 @@ class SSODDatasetHandler:
             )
 
         if pl_images_dir is None:
-            raise ValueError("Pseudo-labeled images dir (pl_images_dir) must be specified.")
+            raise ValueError(
+                "Pseudo-labeled images dir (pl_images_dir) must be specified."
+            )
         resolved_pl_images = Path(pl_images_dir).resolve()
 
         if pl_labels_dir is not None:
@@ -812,7 +816,9 @@ class SSODDatasetHandler:
         count = self.train_dataset.reload_pseudo_labels(
             labels_dir=labels_dir,
             filtered_df=filtered_df,
-            filter_empty=self.filter_empty_pseudo if filter_empty is None else filter_empty,
+            filter_empty=self.filter_empty_pseudo
+            if filter_empty is None
+            else filter_empty,
         )
         self.sampler.update_lengths(
             gt_len=len(self.gt_train_dataset), pl_len=len(self.pl_dataset)

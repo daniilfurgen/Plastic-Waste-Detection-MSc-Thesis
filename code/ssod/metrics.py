@@ -104,11 +104,15 @@ def evaluate_coco(
     }
 
     if not gt_path.exists():
-        log.warning(f"COCO ground truth file not found: {gt_path}; returning zeroed metrics.")
+        log.warning(
+            f"COCO ground truth file not found: {gt_path}; returning zeroed metrics."
+        )
         return default_zero_metrics
 
     if not pred_path.exists():
-        log.warning(f"Predictions JSON file not found: {pred_path}; returning zeroed metrics.")
+        log.warning(
+            f"Predictions JSON file not found: {pred_path}; returning zeroed metrics."
+        )
         return default_zero_metrics
 
     if fix_ids:
@@ -123,7 +127,9 @@ def evaluate_coco(
         return default_zero_metrics
 
     if not preds:
-        log.warning(f"No predictions found in {pred_path}; returning zeroed COCO metrics.")
+        log.warning(
+            f"No predictions found in {pred_path}; returning zeroed COCO metrics."
+        )
         return default_zero_metrics
 
     try:

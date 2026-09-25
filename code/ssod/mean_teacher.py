@@ -60,8 +60,12 @@ class MeanTeacherConfig:
 
     # Datasets
     gt_data_yaml: Path = field(default_factory=lambda: Path("code/data_sliced.yaml"))
-    pl_images_dir: Path = field(default_factory=lambda: Path("data/video_frames/images/all"))
-    pl_labels_dir: Path = field(default_factory=lambda: Path("data/video_frames/labels/all"))
+    pl_images_dir: Path = field(
+        default_factory=lambda: Path("data/video_frames/images/all")
+    )
+    pl_labels_dir: Path = field(
+        default_factory=lambda: Path("data/video_frames/labels/all")
+    )
     coco_gt_path: Path | None = field(
         default_factory=lambda: Path("data/flow_img/val/annotations.json")
     )
@@ -166,7 +170,11 @@ def compute_batch_loss(
     bs = batch["img"].shape[0]
     is_pseudo = batch.get("is_pseudo")
 
-    if unsupervised_weight == 1.0 or is_pseudo is None or not torch.is_tensor(is_pseudo):
+    if (
+        unsupervised_weight == 1.0
+        or is_pseudo is None
+        or not torch.is_tensor(is_pseudo)
+    ):
         loss_tuple = model.loss(batch)
         loss_sum = loss_tuple[0].sum() / max(1, bs)
         loss_items = loss_tuple[1]
@@ -303,7 +311,10 @@ class MeanTeacherTrainer:
         Execute Phase 1: Supervised warm-up on Ground-Truth dataset only.
         If warmup_weights was supplied and exists, skips training and returns path.
         """
-        if self.config.warmup_weights is not None and self.config.warmup_weights.exists():
+        if (
+            self.config.warmup_weights is not None
+            and self.config.warmup_weights.exists()
+        ):
             self.logger.info(
                 f"Using existing warm-up checkpoint: {self.config.warmup_weights}. Skipping warm-up training."
             )
@@ -353,7 +364,9 @@ class MeanTeacherTrainer:
         # 1. Obtain warm-up weights
         ckpt_path = warmup_weights or self.run_warmup()
 
-        self.logger.info(f"=== Phase 2: Mean Teacher SSL Training ({self.config.ssl_epochs} epochs) ===")
+        self.logger.info(
+            f"=== Phase 2: Mean Teacher SSL Training ({self.config.ssl_epochs} epochs) ==="
+        )
         self.logger.info(f"Loading Teacher and Student models from {ckpt_path}...")
 
         # Initialize Teacher and Student
@@ -437,7 +450,9 @@ class MeanTeacherTrainer:
             self.logger.info(f"\n--- Epoch {epoch + 1}/{total_epochs} ---")
 
             # A. Generate Pseudo-labels at epoch start using Teacher model
-            self.logger.info(f"Generating pseudo-labels with Teacher (conf={self.config.pseudo_conf})...")
+            self.logger.info(
+                f"Generating pseudo-labels with Teacher (conf={self.config.pseudo_conf})..."
+            )
             gen_out = pseudo_generator.generate(
                 images_dir=self.config.pl_images_dir,
                 labels_dir=self.config.pl_labels_dir,
@@ -467,7 +482,9 @@ class MeanTeacherTrainer:
                 # Move tensors to device & normalize image to float [0, 1]
                 for k, v in batch.items():
                     if isinstance(v, torch.Tensor):
-                        batch[k] = v.to(self.device, non_blocking=self.device.type == "cuda")
+                        batch[k] = v.to(
+                            self.device, non_blocking=self.device.type == "cuda"
+                        )
                 batch["img"] = batch["img"].float() / 255.0
 
                 optimizer.zero_grad()
@@ -484,7 +501,9 @@ class MeanTeacherTrainer:
 
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(student.model.parameters(), max_norm=10.0)
+                torch.nn.utils.clip_grad_norm_(
+                    student.model.parameters(), max_norm=10.0
+                )
                 scaler.step(optimizer)
                 scaler.update()
 
@@ -577,13 +596,17 @@ class MeanTeacherTrainer:
 @app.command()
 def main(
     gt_yaml: Path = typer.Option(
-        Path("code/data_sliced.yaml"), "--gt-yaml", help="Path to GT dataset YAML."
+        Path("data/flow_img.yaml"), "--gt-yaml", help="Path to GT dataset YAML."
     ),
     pl_images: Path = typer.Option(
-        Path("data/video_frames/images/all"), "--pl-images", help="Path to unlabeled images dir."
+        Path("data/video_frames/images/all"),
+        "--pl-images",
+        help="Path to unlabeled images dir.",
     ),
     pl_labels: Path = typer.Option(
-        Path("data/video_frames/labels/all"), "--pl-labels", help="Path to pseudo-labels dir."
+        Path("data/video_frames/labels/all"),
+        "--pl-labels",
+        help="Path to pseudo-labels dir.",
     ),
     coco_gt: Optional[Path] = typer.Option(
         None, "--coco-gt", help="Path to reference COCO annotations JSON."
@@ -592,16 +615,26 @@ def main(
     warmup_weights: Optional[Path] = typer.Option(
         None, "--warmup-weights", help="Optional path to existing warm-up checkpoint."
     ),
-    warmup_epochs: int = typer.Option(10, "--warmup-epochs", help="Supervised warm-up epochs."),
+    warmup_epochs: int = typer.Option(
+        10, "--warmup-epochs", help="Supervised warm-up epochs."
+    ),
     ssl_epochs: int = typer.Option(50, "--ssl-epochs", help="Mean Teacher SSL epochs."),
     batch: int = typer.Option(10, "--batch", help="Batch size."),
     imgsz: int = typer.Option(640, "--imgsz", help="Input image size."),
     workers: int = typer.Option(4, "--workers", help="DataLoader worker processes."),
     device: Optional[str] = typer.Option(None, "--device", help="PyTorch device."),
-    ema_decay: float = typer.Option(0.999, "--ema-decay", help="Teacher EMA decay per step."),
-    unsupervised_weight: float = typer.Option(1.0, "--unsupervised-weight", help="Weight lambda_u for pseudo loss."),
-    max_pseudo_images: Optional[int] = typer.Option(None, "--max-pseudo-images", help="Max unlabeled images for pseudo-labeling."),
-    project: Path = typer.Option(Path("runs/mean_teacher"), "--project", help="Output project directory."),
+    ema_decay: float = typer.Option(
+        0.999, "--ema-decay", help="Teacher EMA decay per step."
+    ),
+    unsupervised_weight: float = typer.Option(
+        1.0, "--unsupervised-weight", help="Weight lambda_u for pseudo loss."
+    ),
+    max_pseudo_images: Optional[int] = typer.Option(
+        None, "--max-pseudo-images", help="Max unlabeled images for pseudo-labeling."
+    ),
+    project: Path = typer.Option(
+        Path("runs/mean_teacher"), "--project", help="Output project directory."
+    ),
     name: str = typer.Option("exp", "--name", help="Experiment name."),
 ) -> None:
     """Run Mean Teacher semi-supervised training."""
