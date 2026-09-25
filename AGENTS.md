@@ -30,3 +30,4 @@ This repository contains the Master's Thesis project of Daniil Sanzharov. The re
 - **SAHI Framework:** Although SAHI (Slicing Aided Hyper Inference) is present in some legacy scripts and was tested, it **should not be used** for further development or production inference. Experimental results showed poor performance on this specific dataset compared to native YOLO26.
 - **Dependency Management:** Always use `uv` (e.g., `uv add`, `uv run`, `uv lock`). Never use `pip` or `venv` directly. The project environment is located in `.venv/`.
 - **Notebooks:** When working with notebooks in `code/`, ensure the kernel is set to the `.venv` created by `uv`.
+- **Past-experiments:** `code/noisy_student_pipeline/` and `code/sahi_experiments` contain code for the past experiments that demonstrated inadequate results. They can be looked up for reference what was done before, but they should not be used as reference for style or design of the current and future code.
