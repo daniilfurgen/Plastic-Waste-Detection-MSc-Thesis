@@ -220,6 +220,81 @@ class PseudoYOLODataset(YOLODataset):
 
         # Build initial label index
         self.reload(filter_empty=self.filter_empty)
+        self._sync_buffers()
+
+    def _sync_buffers(self) -> None:
+        """Synchronize BaseDataset image caching and dimension buffers to match current items."""
+        n = len(self.im_files)
+        self.ni = n
+        self.ims = [None] * n
+        self.npy_files = [Path(f).with_suffix(".npy") for f in self.im_files]
+        self.im_hw0 = [None] * n
+        self.im_hw = [None] * n
+        self.buffer = []
+        batch_size = getattr(self, "batch_size", 16) or 16
+        augment = getattr(self, "augment", True)
+        self.max_buffer_length = min((self.ni, batch_size * 8, 1000)) if augment else 0
+
+    def load_image(
+        self, i: int, rect_mode: bool = True
+    ) -> tuple[np.ndarray, tuple[int, int], tuple[int, int]]:
+        """Load an image from dataset index 'i' with defensive bounds checking and buffer synchronization."""
+        if i < 0 or i >= len(self.im_files):
+            raise IndexError(
+                f"Index {i} out of bounds for PseudoYOLODataset with {len(self.im_files)} images."
+            )
+
+        if len(self.ims) != len(self.im_files) or len(self.npy_files) != len(self.im_files):
+            self._sync_buffers()
+
+        im = self.ims[i]
+        f = self.im_files[i]
+        fn = self.npy_files[i]
+
+        if im is None:
+            if fn.exists():
+                try:
+                    im = np.load(fn)
+                except Exception as e:
+                    self.logger.warning(
+                        f"Removing corrupt *.npy image file {fn} due to: {e}"
+                    )
+                    Path(fn).unlink(missing_ok=True)
+                    im = cv2.imread(f, flags=self.cv2_flag)
+            else:
+                im = cv2.imread(f, flags=self.cv2_flag)
+
+            if im is None:
+                raise FileNotFoundError(f"Image Not Found: {f}")
+
+            h0, w0 = im.shape[:2]
+            if rect_mode:
+                r = self.imgsz / max(h0, w0)
+                if r != 1:
+                    w, h = (
+                        min(math.ceil(w0 * r), self.imgsz),
+                        min(math.ceil(h0 * r), self.imgsz),
+                    )
+                    im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
+            elif not (h0 == w0 == self.imgsz):
+                im = cv2.resize(im, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR)
+
+            if im.ndim == 2:
+                im = im[..., None]
+
+            if self.augment:
+                self.ims[i] = im
+                self.im_hw0[i] = (h0, w0)
+                self.im_hw[i] = im.shape[:2]
+                self.buffer.append(i)
+                if 1 < len(self.buffer) >= self.max_buffer_length:
+                    j = self.buffer.pop(0)
+                    if self.cache != "ram":
+                        self.ims[j], self.im_hw0[j], self.im_hw[j] = None, None, None
+
+            return im, (h0, w0), im.shape[:2]
+
+        return self.ims[i], self.im_hw0[i], self.im_hw[i]
 
     def get_labels(self) -> list[dict[str, Any]]:
         """Override standard label loading to load from self.labels_dir."""
@@ -294,7 +369,7 @@ class PseudoYOLODataset(YOLODataset):
 
         self.labels = labels_list
         self.im_files = im_files_list
-        self.ni = len(labels_list)
+        self._sync_buffers()
         return labels_list
 
     def load_from_dataframe(
@@ -332,7 +407,7 @@ class PseudoYOLODataset(YOLODataset):
                     im_files_list.append(str(img_path))
             self.labels = labels_list
             self.im_files = im_files_list
-            self.ni = len(labels_list)
+            self._sync_buffers()
             return labels_list
 
         detected_stems = set()
@@ -393,7 +468,7 @@ class PseudoYOLODataset(YOLODataset):
 
         self.labels = labels_list
         self.im_files = im_files_list
-        self.ni = len(labels_list)
+        self._sync_buffers()
         return labels_list
 
     def reload(
@@ -866,6 +941,7 @@ class SSODDatasetHandler:
         self,
         pin_memory: bool = True,
         drop_last: bool = False,
+        persistent_workers: bool = False,
     ) -> DataLoader:
         """
         Construct PyTorch DataLoader for SSOD training using SSODSampler
@@ -879,7 +955,7 @@ class SSODDatasetHandler:
             pin_memory=pin_memory and torch.cuda.is_available(),
             collate_fn=SSODDataset.collate_fn,
             drop_last=drop_last,
-            persistent_workers=(self.workers > 0),
+            persistent_workers=persistent_workers and (self.workers > 0),
         )
 
     def get_val_loader(

@@ -447,7 +447,7 @@ class MeanTeacherTrainer:
         total_epochs = self.config.ssl_epochs
         for epoch in range(total_epochs):
             epoch_start_time = time.time()
-            self.logger.info(f"\n--- Epoch {epoch + 1}/{total_epochs} ---")
+            self.logger.info(f"--- Epoch {epoch + 1}/{total_epochs} ---")
 
             # A. Generate Pseudo-labels at epoch start using Teacher model
             self.logger.info(

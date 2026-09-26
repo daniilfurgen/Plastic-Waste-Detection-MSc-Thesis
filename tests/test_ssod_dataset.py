@@ -15,6 +15,7 @@ import cv2
 import numpy as np
 import polars as pl
 import torch
+from torch.utils.data import DataLoader
 
 from ultralytics.data.augment import (
     Format,
@@ -359,6 +360,129 @@ class TestSSODDatasetIntegration(unittest.TestCase):
             self.assertEqual(b["img"].shape, (2, 3, 128, 128))
             self.assertEqual(len(b["is_pseudo"]), 2)
             break
+
+    def test_pseudo_dataset_buffer_sync_from_empty(self):
+        # Create empty pseudo directory with images only (no labels)
+        empty_lbl_dir = self.temp_dir / "empty_pseudo_labels"
+        empty_lbl_dir.mkdir(parents=True, exist_ok=True)
+
+        pl_ds = PseudoYOLODataset(
+            images_dir=self.pl_img_dir,
+            labels_dir=empty_lbl_dir,
+            filter_empty=True,
+        )
+        self.assertEqual(len(pl_ds), 0)
+        self.assertEqual(len(pl_ds.ims), 0)
+        self.assertEqual(len(pl_ds.npy_files), 0)
+
+        # Now populate label files for both pseudo images
+        _create_synthetic_label(empty_lbl_dir / "pseudo_1.txt", ["0 0.5 0.5 0.2 0.2"])
+        _create_synthetic_label(empty_lbl_dir / "pseudo_2.txt", ["0 0.6 0.6 0.3 0.3"])
+
+        count = pl_ds.reload()
+        self.assertEqual(count, 2)
+        self.assertEqual(len(pl_ds), 2)
+        self.assertEqual(len(pl_ds.ims), 2)
+        self.assertEqual(len(pl_ds.npy_files), 2)
+        self.assertEqual(len(pl_ds.im_hw0), 2)
+        self.assertEqual(len(pl_ds.im_hw), 2)
+
+        # Accessing all items must succeed without IndexError
+        item0 = pl_ds[0]
+        self.assertIn("img", item0)
+        item1 = pl_ds[1]
+        self.assertIn("img", item1)
+
+    def test_pseudo_dataset_dataframe_buffer_sync_from_empty(self):
+        empty_lbl_dir = self.temp_dir / "empty_pseudo_labels_df"
+        empty_lbl_dir.mkdir(parents=True, exist_ok=True)
+
+        pl_ds = PseudoYOLODataset(
+            images_dir=self.pl_img_dir,
+            labels_dir=empty_lbl_dir,
+            filter_empty=True,
+        )
+        self.assertEqual(len(pl_ds), 0)
+        self.assertEqual(len(pl_ds.ims), 0)
+
+        df = pl.DataFrame({
+            "image_stem": ["pseudo_1", "pseudo_2"],
+            "class_id": [0, 0],
+            "x_center": [0.5, 0.6],
+            "y_center": [0.5, 0.6],
+            "w_norm": [0.2, 0.3],
+            "h_norm": [0.2, 0.3],
+            "img_width": [128, 128],
+            "img_height": [128, 128],
+        })
+        pl_ds.reload(filtered_df=df, filter_empty=True)
+        self.assertEqual(len(pl_ds), 2)
+        self.assertEqual(len(pl_ds.ims), 2)
+        self.assertEqual(len(pl_ds.npy_files), 2)
+
+        item = pl_ds[1]
+        self.assertIn("img", item)
+
+    def test_pseudo_dataset_multiprocessing_dataloader_after_reload(self):
+        empty_lbl_dir = self.temp_dir / "empty_pseudo_labels_mp"
+        empty_lbl_dir.mkdir(parents=True, exist_ok=True)
+
+        pl_ds = PseudoYOLODataset(
+            images_dir=self.pl_img_dir,
+            labels_dir=empty_lbl_dir,
+            filter_empty=True,
+        )
+        self.assertEqual(len(pl_ds), 0)
+
+        _create_synthetic_label(empty_lbl_dir / "pseudo_1.txt", ["0 0.5 0.5 0.2 0.2"])
+        _create_synthetic_label(empty_lbl_dir / "pseudo_2.txt", ["0 0.6 0.6 0.3 0.3"])
+        pl_ds.reload()
+
+        loader = DataLoader(
+            pl_ds,
+            batch_size=2,
+            num_workers=2,
+            collate_fn=pl_ds.collate_fn,
+            persistent_workers=False,
+        )
+        batches = list(loader)
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(batches[0]["img"].shape, (2, 3, 640, 640))
+
+    def test_handler_multiprocessing_dynamic_reload(self):
+        empty_pl_lbl = self.temp_dir / "handler_empty_pl_labels"
+        empty_pl_lbl.mkdir(parents=True, exist_ok=True)
+
+        handler = SSODDatasetHandler(
+            gt_train_images=self.gt_train_img_dir,
+            gt_val_images=self.gt_val_img_dir,
+            pl_images_dir=self.pl_img_dir,
+            pl_labels_dir=empty_pl_lbl,
+            imgsz=128,
+            batch_size=2,
+            workers=2,
+            close_mosaic_ratio=0.10,
+        )
+        # GT=4, PL=0
+        self.assertEqual(len(handler.gt_train_dataset), 4)
+        self.assertEqual(len(handler.pl_dataset), 0)
+        self.assertEqual(len(handler.train_dataset), 4)
+
+        # Epoch 1: pseudo labels generated
+        _create_synthetic_label(empty_pl_lbl / "pseudo_1.txt", ["0 0.5 0.5 0.2 0.2"])
+        _create_synthetic_label(empty_pl_lbl / "pseudo_2.txt", ["0 0.6 0.6 0.3 0.3"])
+        reloaded_count = handler.reload_pseudo_labels()
+        self.assertEqual(reloaded_count, 2)
+        self.assertEqual(len(handler.train_dataset), 6)
+
+        train_loader = handler.get_train_loader()
+        all_pseudo_flags: list[bool] = []
+        for batch in train_loader:
+            self.assertEqual(batch["img"].shape, (2, 3, 128, 128))
+            all_pseudo_flags.extend(batch["is_pseudo"].tolist())
+
+        self.assertEqual(len(all_pseudo_flags), 6)
+        self.assertEqual(sum(all_pseudo_flags), 2)  # exactly 2 pseudo items
 
 
 if __name__ == "__main__":
