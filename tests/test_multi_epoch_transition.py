@@ -14,6 +14,7 @@ import unittest
 
 import cv2
 import numpy as np
+import polars as pl
 import torch
 import torch.nn as nn
 from ultralytics import YOLO
@@ -208,6 +209,69 @@ names:
         # Verify dtypes are valid
         dtypes = {p.dtype for p in saved_teacher.model.parameters()}
         self.assertIn(torch.float32, dtypes)
+
+    def test_save_candidates_parquet_per_epoch(self):
+        """
+        Run 2 SSL epochs with save_candidates=True:
+        - Verifies that <runs_dir>/candidates/ directory is created.
+        - Verifies that candidates_epoch_1.parquet and candidates_epoch_2.parquet are saved.
+        - Reads parquet files with Polars and asserts expected schema columns.
+        """
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+        cfg = MeanTeacherConfig(
+            model_name="code/yolo26n.pt",
+            warmup_weights=Path("code/yolo26n.pt"),
+            gt_data_yaml=self.gt_yaml,
+            pl_images_dir=self.pl_images_dir,
+            pl_labels_dir=self.pl_labels_dir,
+            coco_gt_path=self.coco_gt,
+            warmup_epochs=0,
+            ssl_epochs=2,
+            batch_size=2,
+            imgsz=128,
+            workers=0,
+            device=device,
+            ema_decay=0.99,
+            save_candidates=True,
+            runs_dir=self.runs_dir,
+            experiment_name="test_cand_parquet",
+        )
+
+        trainer = MeanTeacherTrainer(config=cfg)
+        trainer.train_mean_teacher(warmup_weights=Path("code/yolo26n.pt"))
+
+        cand_dir = self.runs_dir / "test_cand_parquet" / "candidates"
+        self.assertTrue(cand_dir.exists(), "Candidates directory was not created!")
+
+        epoch1_file = cand_dir / "candidates_epoch_1.parquet"
+        epoch2_file = cand_dir / "candidates_epoch_2.parquet"
+        self.assertTrue(epoch1_file.exists(), f"{epoch1_file} does not exist!")
+        self.assertTrue(epoch2_file.exists(), f"{epoch2_file} does not exist!")
+
+        for p_file in [epoch1_file, epoch2_file]:
+            df = pl.read_parquet(p_file)
+            self.assertIsInstance(df, pl.DataFrame)
+            expected_cols = [
+                "image_stem",
+                "label_path",
+                "img_width",
+                "img_height",
+                "class_id",
+                "score",
+                "x1",
+                "y1",
+                "x2",
+                "y2",
+                "w",
+                "h",
+                "size_bin",
+            ]
+            for col in expected_cols:
+                self.assertIn(col, df.columns)
+            if len(df) > 0:
+                scores = df["score"].to_list()
+                self.assertTrue(all(0.0 <= s <= 1.0 for s in scores))
 
 
 if __name__ == "__main__":

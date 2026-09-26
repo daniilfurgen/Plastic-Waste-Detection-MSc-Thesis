@@ -96,6 +96,8 @@ class MeanTeacherConfig:
     pseudo_iou: float = 0.5
     pseudo_half: bool = True
     max_pseudo_images: int | None = None
+    save_candidates: bool = False
+    candidates_dir_name: str = "candidates"
 
     # Logging and output
     runs_dir: Path = field(default_factory=lambda: Path("runs/mean_teacher"))
@@ -548,6 +550,12 @@ class MeanTeacherTrainer:
             if hasattr(pseudo_generator.model, "predictor"):
                 pseudo_generator.model.predictor = None
 
+            candidates_path = None
+            if self.config.save_candidates:
+                cand_dir = self.exp_dir / self.config.candidates_dir_name
+                cand_dir.mkdir(parents=True, exist_ok=True)
+                candidates_path = cand_dir / f"candidates_epoch_{epoch + 1}.parquet"
+
             self.logger.info(
                 f"Generating pseudo-labels with Teacher (conf={self.config.pseudo_conf})..."
             )
@@ -555,6 +563,7 @@ class MeanTeacherTrainer:
                 images_dir=self.config.pl_images_dir,
                 labels_dir=self.config.pl_labels_dir,
                 max_images=self.config.max_pseudo_images,
+                save_candidates_path=candidates_path,
             )
             dataset_handler.reload_pseudo_labels(filtered_df=gen_out.get("filtered_df"))
 
@@ -733,6 +742,11 @@ def main(
     max_pseudo_images: Optional[int] = typer.Option(
         None, "--max-pseudo-images", help="Max unlabeled images for pseudo-labeling."
     ),
+    save_candidates: bool = typer.Option(
+        False,
+        "--save-candidates",
+        help="Save raw multi-view pseudo-label candidate detections to Parquet files per epoch.",
+    ),
     project: Path = typer.Option(
         Path("runs/mean_teacher"), "--project", help="Output project directory."
     ),
@@ -755,6 +769,7 @@ def main(
         ema_decay=ema_decay,
         unsupervised_weight=unsupervised_weight,
         max_pseudo_images=max_pseudo_images,
+        save_candidates=save_candidates,
         runs_dir=project,
         experiment_name=name,
     )
