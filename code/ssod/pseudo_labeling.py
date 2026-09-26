@@ -23,6 +23,27 @@ SIZE_BINS: dict[str, tuple[float, float]] = {
     "large": (96.0**2, float("inf")),
 }
 
+EMPTY_FILTERED_SCHEMA: dict[str, Any] = {
+    "image_stem": pl.String,
+    "label_path": pl.String,
+    "img_width": pl.Int32,
+    "img_height": pl.Int32,
+    "class_id": pl.Int32,
+    "score": pl.Float32,
+    "x1": pl.Float32,
+    "y1": pl.Float32,
+    "x2": pl.Float32,
+    "y2": pl.Float32,
+    "w": pl.Float32,
+    "h": pl.Float32,
+    "size_bin": pl.String,
+    "x_center": pl.Float32,
+    "y_center": pl.Float32,
+    "w_norm": pl.Float32,
+    "h_norm": pl.Float32,
+    "line": pl.String,
+}
+
 app = typer.Typer(
     name="pseudo-label-generator",
     help="Generate pseudo-labels via multi-view inference and COCO size-bin ground thresholding.",
@@ -267,6 +288,8 @@ class PseudoLabelGenerator:
         self.iou_threshold = iou_threshold
         self.device = device
         self.logger = logger or get_logger()
+        self._cached_images_dir: Path | None = None
+        self._cached_image_files: list[Path] | None = None
 
     def generate(
         self,
@@ -284,9 +307,18 @@ class PseudoLabelGenerator:
         5. Compute optimal ground threshold per COCO size bin.
         6. Filter candidates by threshold and save YOLO .txt labels (omitting empty files).
         """
+        if hasattr(self.model, "predictor"):
+            self.model.predictor = None
+
         resolved_img_dir, resolved_lbl_dir, image_files = resolve_dataset_paths(
             images_dir, labels_dir
         )
+
+        if self._cached_image_files is None or self._cached_images_dir != resolved_img_dir:
+            self._cached_images_dir = resolved_img_dir
+            self._cached_image_files = image_files
+        else:
+            image_files = self._cached_image_files
 
         if max_images is not None and max_images > 0:
             image_files = image_files[:max_images]
@@ -346,11 +378,27 @@ class PseudoLabelGenerator:
                 for chunk_paths in chunks:
                     # Parallel image decode via thread pool
                     cv_imgs = list(pool.map(lambda p: cv2.imread(str(p)), chunk_paths))
-                    # AVX2 SIMD flip
-                    cv_flipped = list(pool.map(lambda im: cv2.flip(im, 1), cv_imgs))
+                    # AVX2 SIMD flip with None guard
+                    cv_flipped = list(
+                        pool.map(
+                            lambda im: cv2.flip(im, 1) if im is not None else None,
+                            cv_imgs,
+                        )
+                    )
+
+                    valid_items = [
+                        (p, im, flp)
+                        for p, im, flp in zip(chunk_paths, cv_imgs, cv_flipped)
+                        if im is not None and flp is not None
+                    ]
+                    if not valid_items:
+                        pbar.update(len(chunk_paths))
+                        continue
+
+                    v_paths, v_imgs, v_flips = zip(*valid_items)
 
                     predict_kwargs: dict[str, Any] = {
-                        "batch": len(chunk_paths),
+                        "batch": len(v_paths),
                         "half": self.half,
                         "conf": self.conf,
                         "verbose": False,
@@ -358,13 +406,11 @@ class PseudoLabelGenerator:
                     if self.device is not None:
                         predict_kwargs["device"] = self.device
 
-                    preds_norm = self.model.predict(cv_imgs, **predict_kwargs)
-                    preds_flip = self.model.predict(cv_flipped, **predict_kwargs)
+                    preds_norm = self.model.predict(list(v_imgs), **predict_kwargs)
+                    preds_flip = self.model.predict(list(v_flips), **predict_kwargs)
 
-                    for j, img_path in enumerate(chunk_paths):
-                        im = cv_imgs[j]
-                        if im is None:
-                            continue
+                    for j, img_path in enumerate(v_paths):
+                        im = v_imgs[j]
                         img_height, img_width = im.shape[:2]
 
                         rel_path = img_path.relative_to(resolved_img_dir)
@@ -435,7 +481,7 @@ class PseudoLabelGenerator:
                 "thresholds": {},
                 "labels_written": 0,
                 "candidates_df": candidates_df,
-                "filtered_df": pl.DataFrame(),
+                "filtered_df": pl.DataFrame(schema=EMPTY_FILTERED_SCHEMA),
             }
 
         # 4. Compute optimal ground threshold per COCO size bin
@@ -507,6 +553,8 @@ class PseudoLabelGenerator:
                 target_file.parent.mkdir(parents=True, exist_ok=True)
                 target_file.write_text(row["content"] + "\n", encoding="utf-8")
                 labels_written += 1
+        else:
+            filtered_df = pl.DataFrame(schema=EMPTY_FILTERED_SCHEMA)
 
         self.logger.info(
             f"Saved {labels_written} YOLO annotation files into {resolved_lbl_dir}"

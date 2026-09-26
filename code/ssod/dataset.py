@@ -205,6 +205,8 @@ class PseudoYOLODataset(YOLODataset):
         self.filter_empty = filter_empty
         self.logger = logger or get_logger()
         self.augment_cfg = hyp or SSODAugmentConfig()
+        self._cached_image_files: list[Path] | None = None
+        self._cached_stem_to_path: dict[str, Path] | None = None
 
         data_dict = data or {"names": {0: "object"}, "nc": 1}
 
@@ -301,15 +303,29 @@ class PseudoYOLODataset(YOLODataset):
         return self._load_labels_from_disk(filter_empty=self.filter_empty)
 
     def _find_image_files(self) -> list[Path]:
+        if self._cached_image_files is not None:
+            return self._cached_image_files
         if not self.images_dir.exists():
+            self._cached_image_files = []
             return []
-        return sorted(
+        self._cached_image_files = sorted(
             [
                 p
                 for p in self.images_dir.rglob("*")
                 if p.is_file() and p.suffix.lower() in VALID_IMAGE_EXTS
             ]
         )
+        return self._cached_image_files
+
+    def _get_stem_to_path_map(self) -> dict[str, Path]:
+        if self._cached_stem_to_path is not None:
+            return self._cached_stem_to_path
+        self._cached_stem_to_path = {p.stem: p for p in self._find_image_files()}
+        return self._cached_stem_to_path
+
+    def clear_cache(self) -> None:
+        self._cached_image_files = None
+        self._cached_stem_to_path = None
 
     def _load_labels_from_disk(self, filter_empty: bool = True) -> list[dict[str, Any]]:
         img_files = self._find_image_files()
@@ -382,7 +398,7 @@ class PseudoYOLODataset(YOLODataset):
         Expected schema columns: 'image_stem' or 'label_path', 'class_id',
         'x_center', 'y_center', 'w_norm', 'h_norm', 'img_width', 'img_height'.
         """
-        all_imgs = {p.stem: p for p in self._find_image_files()}
+        all_imgs = self._get_stem_to_path_map()
         labels_list: list[dict[str, Any]] = []
         im_files_list: list[str] = []
 
@@ -941,7 +957,7 @@ class SSODDatasetHandler:
         self,
         pin_memory: bool = True,
         drop_last: bool = False,
-        persistent_workers: bool = False,
+        persistent_workers: bool = True,
     ) -> DataLoader:
         """
         Construct PyTorch DataLoader for SSOD training using SSODSampler

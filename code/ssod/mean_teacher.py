@@ -59,7 +59,7 @@ class MeanTeacherConfig:
     warmup_weights: Path | None = None
 
     # Datasets
-    gt_data_yaml: Path = field(default_factory=lambda: Path("code/data_sliced.yaml"))
+    gt_data_yaml: Path = field(default_factory=lambda: Path("data/flow_img.yaml"))
     pl_images_dir: Path = field(
         default_factory=lambda: Path("data/video_frames/images/all")
     )
@@ -73,13 +73,13 @@ class MeanTeacherConfig:
     # Schedules & dimensions
     warmup_epochs: int = 10
     ssl_epochs: int = 50
-    batch_size: int = 10
+    batch_size: int = 16
     imgsz: int = 640
     workers: int = 4
     device: str | int | None = None
 
     # Optimizer & Scheduler
-    lr0: float = 0.002
+    lr0: float = 0.0002
     lrf: float = 0.01
     momentum: float = 0.937
     weight_decay: float = 0.0005
@@ -113,6 +113,59 @@ class MeanTeacherConfig:
         self.runs_dir = Path(self.runs_dir).resolve()
 
 
+class VectorizedEMA:
+    """
+    High-throughput Exponential Moving Average (EMA) for Teacher-Student models.
+    Pre-pairs parameters and buffers once at initialization to eliminate
+    the state_dict() dictionary overhead and utilizes vectorized torch._foreach operations.
+    """
+
+    def __init__(
+        self,
+        teacher_model: nn.Module,
+        student_model: nn.Module,
+        decay: float = 0.999,
+    ) -> None:
+        self.teacher_model = teacher_model
+        self.student_model = student_model
+        self.decay = decay
+
+        self.fp_pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
+        self.non_fp_pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+        s_params = dict(student_model.named_parameters())
+        for name, t_p in teacher_model.named_parameters():
+            if name in s_params:
+                s_p = s_params[name]
+                if t_p.dtype.is_floating_point:
+                    self.fp_pairs.append((t_p, s_p))
+                else:
+                    self.non_fp_pairs.append((t_p, s_p))
+
+        s_buffers = dict(student_model.named_buffers())
+        for name, t_b in teacher_model.named_buffers():
+            if name in s_buffers:
+                s_b = s_buffers[name]
+                if t_b.dtype.is_floating_point:
+                    self.fp_pairs.append((t_b, s_b))
+                else:
+                    self.non_fp_pairs.append((t_b, s_b))
+
+        self.t_fp_tensors = [p[0] for p in self.fp_pairs]
+        self.s_fp_tensors = [p[1] for p in self.fp_pairs]
+
+    def update(self) -> None:
+        if not self.fp_pairs:
+            return
+        with torch.no_grad():
+            torch._foreach_mul_(self.t_fp_tensors, self.decay)
+            torch._foreach_add_(
+                self.t_fp_tensors, self.s_fp_tensors, alpha=1.0 - self.decay
+            )
+            for t_b, s_b in self.non_fp_pairs:
+                t_b.copy_(s_b)
+
+
 def update_teacher_ema(
     teacher_model: nn.Module,
     student_model: nn.Module,
@@ -124,14 +177,32 @@ def update_teacher_ema(
     Non-floating-point buffers (e.g. num_batches_tracked) are copied directly.
     """
     with torch.no_grad():
-        t_sd = teacher_model.state_dict()
-        s_sd = student_model.state_dict()
-        for k, v in t_sd.items():
-            if k in s_sd:
-                if v.dtype.is_floating_point:
-                    v.mul_(decay).add_(s_sd[k].detach().to(v.device), alpha=1.0 - decay)
+        t_fp = []
+        s_fp = []
+        s_params = dict(student_model.named_parameters())
+        s_buffers = dict(student_model.named_buffers())
+
+        for name, t_p in teacher_model.named_parameters():
+            if name in s_params:
+                s_p = s_params[name]
+                if t_p.dtype.is_floating_point:
+                    t_fp.append(t_p)
+                    s_fp.append(s_p.detach().to(t_p.device))
                 else:
-                    v.copy_(s_sd[k].detach())
+                    t_p.copy_(s_p.detach())
+
+        for name, t_b in teacher_model.named_buffers():
+            if name in s_buffers:
+                s_b = s_buffers[name]
+                if t_b.dtype.is_floating_point:
+                    t_fp.append(t_b)
+                    s_fp.append(s_b.detach().to(t_b.device))
+                else:
+                    t_b.copy_(s_b.detach())
+
+        if t_fp:
+            torch._foreach_mul_(t_fp, decay)
+            torch._foreach_add_(t_fp, s_fp, alpha=1.0 - decay)
 
 
 def split_batch(batch: dict[str, Any], mask: torch.Tensor) -> dict[str, Any]:
@@ -381,6 +452,9 @@ class MeanTeacherTrainer:
         teacher.model.args = IterableSimpleNamespace(**cfg_dict)
 
         # Place models on device
+        if self.device.type == "cuda":
+            torch.backends.cudnn.benchmark = True
+
         student.model = student.model.to(self.device)
         teacher.model = teacher.model.to(self.device)
         teacher.model.eval()
@@ -390,9 +464,20 @@ class MeanTeacherTrainer:
         for p in teacher.model.parameters():
             p.requires_grad = False
 
+        # Vectorized EMA tracker
+        ema = VectorizedEMA(
+            teacher_model=teacher.model,
+            student_model=student.model,
+            decay=self.config.ema_decay,
+        )
+
+        last_path = self.weights_dir / "last.pt"
+        best_path = self.weights_dir / "best.pt"
+        teacher.save(str(last_path))
+
         # 2. Initialize SSODDatasetHandler and PseudoLabelGenerator
         pseudo_generator = PseudoLabelGenerator(
-            teacher_model=teacher,
+            teacher_model=YOLO(str(last_path)),
             batch_size=self.config.batch_size * 2,
             half=self.config.pseudo_half and self.device.type == "cuda",
             workers=self.config.workers,
@@ -431,9 +516,16 @@ class MeanTeacherTrainer:
             T_max=self.config.ssl_epochs,
             eta_min=self.config.lr0 * self.config.lrf,
         )
+
+        is_bf16 = self.device.type == "cuda" and torch.cuda.is_bf16_supported()
+        amp_dtype = torch.bfloat16 if is_bf16 else torch.float16
+        use_scaler = self.config.amp and (self.device.type == "cuda") and not is_bf16
         scaler = torch.amp.GradScaler(
             self.device.type,
-            enabled=self.config.amp and self.device.type == "cuda",
+            enabled=use_scaler,
+        )
+        self.logger.info(
+            f"Training precision: {'bfloat16 (native, scaler-free)' if is_bf16 else ('float16 with GradScaler' if self.config.amp else 'float32')}"
         )
 
         # 4. Results tracking
@@ -449,7 +541,13 @@ class MeanTeacherTrainer:
             epoch_start_time = time.time()
             self.logger.info(f"--- Epoch {epoch + 1}/{total_epochs} ---")
 
-            # A. Generate Pseudo-labels at epoch start using Teacher model
+            # A. Snapshot teacher weights and isolate for pseudo-label generation
+            teacher.save(str(last_path))
+            inference_teacher = YOLO(str(last_path))
+            pseudo_generator.model = inference_teacher
+            if hasattr(pseudo_generator.model, "predictor"):
+                pseudo_generator.model.predictor = None
+
             self.logger.info(
                 f"Generating pseudo-labels with Teacher (conf={self.config.pseudo_conf})..."
             )
@@ -461,7 +559,7 @@ class MeanTeacherTrainer:
             dataset_handler.reload_pseudo_labels(filtered_df=gen_out.get("filtered_df"))
 
             # B. Configure epoch (25% GT tail sampling, 10% mosaic closing)
-            train_loader = dataset_handler.get_train_loader()
+            train_loader = dataset_handler.get_train_loader(persistent_workers=True)
             dataset_handler.set_epoch(
                 epoch=epoch,
                 total_epochs=total_epochs,
@@ -491,6 +589,7 @@ class MeanTeacherTrainer:
 
                 with torch.amp.autocast(
                     self.device.type,
+                    dtype=amp_dtype,
                     enabled=self.config.amp and self.device.type == "cuda",
                 ):
                     loss, loss_items = compute_batch_loss(
@@ -499,20 +598,24 @@ class MeanTeacherTrainer:
                         unsupervised_weight=self.config.unsupervised_weight,
                     )
 
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(
-                    student.model.parameters(), max_norm=10.0
-                )
-                scaler.step(optimizer)
-                scaler.update()
+                if use_scaler:
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        student.model.parameters(), max_norm=10.0
+                    )
+                    if torch.isfinite(grad_norm):
+                        scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(
+                        student.model.parameters(), max_norm=10.0
+                    )
+                    optimizer.step()
 
-                # D. Update Teacher EMA at EVERY STEP
-                update_teacher_ema(
-                    teacher_model=teacher.model,
-                    student_model=student.model,
-                    decay=self.config.ema_decay,
-                )
+                # D. Update Teacher EMA at EVERY STEP (vectorized foreach)
+                ema.update()
 
                 train_losses.append(loss.item())
                 pbar.set_postfix({"loss": f"{loss.item():.4f}"})
@@ -520,13 +623,15 @@ class MeanTeacherTrainer:
             scheduler.step()
             mean_train_loss = float(np.mean(train_losses)) if train_losses else 0.0
 
-            # E. Evaluate Teacher Model on GT Validation split
+            # E. Evaluate Teacher Model on GT Validation split using isolated clean instance
             self.logger.info("Evaluating Teacher model on validation split...")
-            teacher.model.eval()
             val_save_dir = self.exp_dir / f"val_epoch_{epoch + 1}"
 
+            teacher.save(str(last_path))
+            val_teacher = YOLO(str(last_path))
+
             val_metrics = evaluate_model_coco(
-                model=teacher,
+                model=val_teacher,
                 gt_data_yaml=self.config.gt_data_yaml,
                 coco_gt_path=self.config.coco_gt_path,
                 imgsz=self.config.imgsz,
@@ -567,13 +672,9 @@ class MeanTeacherTrainer:
                 f.write(",".join(str(record[k]) for k in fieldnames) + "\n")
 
             # Checkpoint management
-            last_path = self.weights_dir / "last.pt"
-            teacher.save(str(last_path))
-
             if fitness > best_fitness:
                 best_fitness = fitness
                 best_epoch = epoch + 1
-                best_path = self.weights_dir / "best.pt"
                 teacher.save(str(best_path))
                 self.logger.info(
                     f"New best model saved to {best_path} (fitness={best_fitness:.4f} at epoch {best_epoch})."
@@ -619,7 +720,7 @@ def main(
         10, "--warmup-epochs", help="Supervised warm-up epochs."
     ),
     ssl_epochs: int = typer.Option(50, "--ssl-epochs", help="Mean Teacher SSL epochs."),
-    batch: int = typer.Option(10, "--batch", help="Batch size."),
+    batch: int = typer.Option(16, "--batch", help="Batch size."),
     imgsz: int = typer.Option(640, "--imgsz", help="Input image size."),
     workers: int = typer.Option(4, "--workers", help="DataLoader worker processes."),
     device: Optional[str] = typer.Option(None, "--device", help="PyTorch device."),
