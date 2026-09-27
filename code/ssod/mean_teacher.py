@@ -131,6 +131,24 @@ app = typer.Typer(
 )
 
 
+def infer_exp_dir_from_resume(resume_path: Path | str) -> tuple[Path, str]:
+    """
+    Infer (runs_dir, experiment_name) from a checkpoint file or directory path.
+
+    Examples:
+      - 'runs/mean_teacher/YOLO26m-SSOD-100-150' -> (Path('runs/mean_teacher'), 'YOLO26m-SSOD-100-150')
+      - 'runs/mean_teacher/YOLO26m-SSOD-100-150/weights/last.pt' -> (Path('runs/mean_teacher'), 'YOLO26m-SSOD-100-150')
+      - 'runs/mean_teacher/YOLO26m-SSOD-100-150/paused.pt' -> (Path('runs/mean_teacher'), 'YOLO26m-SSOD-100-150')
+    """
+    target = Path(resume_path).resolve()
+    if target.suffix in (".pt", ".pth") or target.is_file():
+        parent = target.parent
+        if parent.name == "weights":
+            return parent.parent.parent, parent.parent.name
+        return parent.parent, parent.name
+    return target.parent, target.name
+
+
 @dataclass
 class MeanTeacherConfig:
     """Configuration for Mean Teacher training."""
@@ -196,6 +214,15 @@ class MeanTeacherConfig:
             self.warmup_weights = Path(self.warmup_weights).resolve()
         if self.resume is not None:
             self.resume = Path(self.resume).resolve()
+            # If experiment_name was left at default "exp", infer from resume path
+            if self.experiment_name == "exp":
+                inferred_runs_dir, inferred_exp_name = infer_exp_dir_from_resume(
+                    self.resume
+                )
+                self.experiment_name = inferred_exp_name
+                # If runs_dir was left at default "runs/mean_teacher", infer too
+                if Path(self.runs_dir).resolve() == Path("runs/mean_teacher").resolve():
+                    self.runs_dir = inferred_runs_dir
         self.runs_dir = Path(self.runs_dir).resolve()
 
 
@@ -563,14 +590,16 @@ class MeanTeacherTrainer:
         raw_ckpt = torch.load(ckpt_file, map_location="cpu", weights_only=False)
 
         # Infer run directory if checkpoint is inside a runs directory
-        if ckpt_file.parent.name == "weights":
-            inferred_exp_dir = ckpt_file.parent.parent
-            if inferred_exp_dir != self.exp_dir:
-                self.logger.info(
-                    f"Aligning experiment directory to checkpoint run: {inferred_exp_dir}"
-                )
-                self.exp_dir = inferred_exp_dir
-                self.weights_dir = self.exp_dir / "weights"
+        inferred_runs_dir, inferred_exp_name = infer_exp_dir_from_resume(ckpt_file)
+        inferred_exp_dir = inferred_runs_dir / inferred_exp_name
+        if inferred_exp_dir != self.exp_dir:
+            self.logger.info(
+                f"Aligning experiment directory to checkpoint run: {inferred_exp_dir}"
+            )
+            self.exp_dir = inferred_exp_dir
+            self.weights_dir = self.exp_dir / "weights"
+            self.config.runs_dir = inferred_runs_dir
+            self.config.experiment_name = inferred_exp_name
 
         # Check for results.csv
         csv_candidates = [
@@ -1274,10 +1303,16 @@ def main(
         "--save-candidates",
         help="Save raw multi-view pseudo-label candidate detections to Parquet files per epoch.",
     ),
-    project: Path = typer.Option(
-        Path("runs/mean_teacher"), "--project", help="Output project directory."
+    project: Optional[Path] = typer.Option(
+        None,
+        "--project",
+        help="Output project directory [default: runs/mean_teacher or inferred from --resume].",
     ),
-    name: str = typer.Option("exp", "--name", help="Experiment name."),
+    name: Optional[str] = typer.Option(
+        None,
+        "--name",
+        help="Experiment name [default: exp or inferred from --resume].",
+    ),
     resume: Optional[Path] = typer.Option(
         None,
         "--resume",
@@ -1286,6 +1321,18 @@ def main(
     ),
 ) -> None:
     """Run Mean Teacher semi-supervised training."""
+    if resume is not None:
+        inferred_project, inferred_name = infer_exp_dir_from_resume(resume)
+        if project is None:
+            project = inferred_project
+        if name is None:
+            name = inferred_name
+    else:
+        if project is None:
+            project = Path("runs/mean_teacher")
+        if name is None:
+            name = "exp"
+
     cfg = MeanTeacherConfig(
         model_name=model,
         warmup_weights=warmup_weights,

@@ -231,5 +231,49 @@ class TestMeanTeacherKeyboardInterrupt(unittest.TestCase):
             self.assertEqual(loaded["format"], "rich")
 
 
+    def test_infer_exp_dir_from_resume(self):
+        """Test inference of runs_dir and experiment_name from different resume paths."""
+        from ssod.mean_teacher import infer_exp_dir_from_resume
+
+        # 1. Target is a run directory
+        run_dir = Path("/tmp/experiments/my_ssl_run")
+        runs_dir, exp_name = infer_exp_dir_from_resume(run_dir)
+        self.assertEqual(runs_dir, Path("/tmp/experiments"))
+        self.assertEqual(exp_name, "my_ssl_run")
+
+        # 2. Target is a file inside weights/
+        ckpt_weights = Path("/tmp/experiments/my_ssl_run/weights/paused.pt")
+        runs_dir, exp_name = infer_exp_dir_from_resume(ckpt_weights)
+        self.assertEqual(runs_dir, Path("/tmp/experiments"))
+        self.assertEqual(exp_name, "my_ssl_run")
+
+        # 3. Target is a file directly in run directory
+        ckpt_direct = Path("/tmp/experiments/my_ssl_run/paused.pt")
+        runs_dir, exp_name = infer_exp_dir_from_resume(ckpt_direct)
+        self.assertEqual(runs_dir, Path("/tmp/experiments"))
+        self.assertEqual(exp_name, "my_ssl_run")
+
+    def test_config_infers_name_and_project_without_creating_exp_dir(self):
+        """Verify MeanTeacherConfig and Trainer infer experiment_name and do not create 'exp' dir."""
+        custom_run_dir = self.runs_dir / "YOLO26m-SSOD-100-150"
+        weights_dir = custom_run_dir / "weights"
+        weights_dir.mkdir(parents=True, exist_ok=True)
+        (weights_dir / "last.pt").touch()
+
+        # Instantiate config with resume pointing to run directory, without explicit experiment_name
+        cfg = MeanTeacherConfig(
+            resume=custom_run_dir,
+            runs_dir=self.runs_dir,
+        )
+
+        self.assertEqual(cfg.experiment_name, "YOLO26m-SSOD-100-150")
+        trainer = MeanTeacherTrainer(config=cfg)
+        self.assertEqual(trainer.exp_dir, custom_run_dir)
+        self.assertEqual(trainer.weights_dir, weights_dir)
+
+        # Verify that runs_dir/exp was NOT created
+        self.assertFalse((self.runs_dir / "exp").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
