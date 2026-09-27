@@ -314,7 +314,10 @@ class PseudoLabelGenerator:
             images_dir, labels_dir
         )
 
-        if self._cached_image_files is None or self._cached_images_dir != resolved_img_dir:
+        if (
+            self._cached_image_files is None
+            or self._cached_images_dir != resolved_img_dir
+        ):
             self._cached_images_dir = resolved_img_dir
             self._cached_image_files = image_files
         else:

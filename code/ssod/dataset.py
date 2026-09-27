@@ -246,7 +246,9 @@ class PseudoYOLODataset(YOLODataset):
                 f"Index {i} out of bounds for PseudoYOLODataset with {len(self.im_files)} images."
             )
 
-        if len(self.ims) != len(self.im_files) or len(self.npy_files) != len(self.im_files):
+        if len(self.ims) != len(self.im_files) or len(self.npy_files) != len(
+            self.im_files
+        ):
             self._sync_buffers()
 
         im = self.ims[i]
@@ -279,7 +281,9 @@ class PseudoYOLODataset(YOLODataset):
                     )
                     im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
             elif not (h0 == w0 == self.imgsz):
-                im = cv2.resize(im, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR)
+                im = cv2.resize(
+                    im, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR
+                )
 
             if im.ndim == 2:
                 im = im[..., None]
