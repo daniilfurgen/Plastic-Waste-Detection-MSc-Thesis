@@ -10,6 +10,7 @@ import sys
 import tempfile
 from typing import Any
 import unittest
+from unittest import mock
 
 import cv2
 import numpy as np
@@ -34,7 +35,9 @@ if str(CODE_DIR) not in sys.path:
     sys.path.insert(0, str(CODE_DIR))
 
 from ssod.dataset import (  # noqa: E402
+    BoxAwareRandomErasing,
     PseudoYOLODataset,
+    RandomGaussianBlur,
     SSODAugmentConfig,
     SSODDataset,
     SSODDatasetHandler,
@@ -111,6 +114,52 @@ class TestSSODTransforms(unittest.TestCase):
         self.assertTrue(_has_transform(transforms_pseudo, RandomHSV))
         self.assertTrue(_has_transform(transforms_pseudo, RandomFlip))
 
+    def test_pseudo_strong_transforms(self):
+        class DummyDataset:
+            cache = None
+        weak = build_pseudo_transforms(DummyDataset(), imgsz=640, hyp=SSODAugmentConfig())
+        self.assertFalse(_has_transform(weak, RandomGaussianBlur))
+        self.assertFalse(_has_transform(weak, BoxAwareRandomErasing))
+
+        strong = build_pseudo_transforms(DummyDataset(), imgsz=640, hyp=SSODAugmentConfig(pl_strong=True))
+        self.assertFalse(_has_transform(strong, Mosaic))
+        self.assertTrue(_has_transform(strong, RandomGaussianBlur))
+        self.assertTrue(_has_transform(strong, BoxAwareRandomErasing))
+        self.assertTrue(_has_transform(strong, RandomFlip))
+
+    def test_box_aware_erasing_drops_only_covered_boxes(self):
+        from ultralytics.utils.instance import Instances
+
+        img = np.zeros((100, 100, 3), dtype=np.uint8)
+        boxes = np.array([[10, 10, 30, 30], [60, 60, 90, 90]], dtype=np.float32)
+        labels = {
+            "img": img,
+            "cls": np.array([[0.0], [0.0]], dtype=np.float32),
+            "instances": Instances(
+                boxes,
+                segments=np.zeros((0, 1000, 2), dtype=np.float32),
+                bbox_format="xyxy",
+                normalized=False,
+            ),
+        }
+        erasing = BoxAwareRandomErasing(p=1.0, max_patches=1, area=(0.3, 0.3), drop_ratio=0.5)
+        # Force a single square patch (~55x55) anchored at (0, 0): covers box 1, misses box 2
+        original_randint = np.random.randint
+
+        def fixed_randint(low, high=None, size=None, dtype=int):
+            if size is not None:
+                return original_randint(low, high, size=size, dtype=dtype)
+            return 1 if high == 2 else 0
+
+        with mock.patch.object(np.random, "randint", side_effect=fixed_randint), \
+                mock.patch.object(np.random, "uniform", side_effect=lambda a, b: 0.0 if a < 0 else a):
+            out = erasing(labels)
+
+        self.assertEqual(len(out["instances"]), len(out["cls"]))
+        kept = out["instances"].bboxes.tolist()
+        self.assertNotIn([10.0, 10.0, 30.0, 30.0], kept, "Box under the patch must be dropped")
+        self.assertIn([60.0, 60.0, 90.0, 90.0], kept, "Box outside the patch must be kept")
+
     def test_val_transforms_only_letterbox_and_format(self):
         transforms_val = build_val_transforms(imgsz=640)
         self.assertTrue(_has_transform(transforms_val, LetterBox))
@@ -156,6 +205,21 @@ class TestSSODSampler(unittest.TestCase):
 
         # Tail and head GT items must be disjoint
         self.assertTrue(set(gt_in_head).isdisjoint(set(tail_indices)), "Head GT and Tail GT must be mutually exclusive")
+
+    def test_gt_repeat_scales_head_gt_only(self):
+        n_gt, n_pl = 100, 50
+        sampler = SSODSampler(gt_len=n_gt, pl_len=n_pl, tail_ratio=0.25, seed=42, gt_repeat=3)
+        indices = list(sampler)
+
+        self.assertEqual(len(indices), 3 * 75 + 25 + n_pl)
+        tail = indices[-25:]
+        head = indices[:-25]
+        self.assertTrue(all(idx < n_gt for idx in tail))
+        head_gt = [idx for idx in head if idx < n_gt]
+        self.assertEqual(len(head_gt), 3 * 75)
+        self.assertEqual(len(set(head_gt)), 75)
+        self.assertTrue(set(head_gt).isdisjoint(tail))
+        self.assertEqual(sorted(idx for idx in head if idx >= n_gt), list(range(n_gt, n_gt + n_pl)))
 
     def test_reproducibility_with_epoch(self):
         sampler = SSODSampler(gt_len=40, pl_len=20, tail_ratio=0.25, seed=123)

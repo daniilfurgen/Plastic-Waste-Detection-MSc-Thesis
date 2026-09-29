@@ -191,8 +191,8 @@ names:
         trainer = MeanTeacherTrainer(config=cfg)
         results = trainer.train_mean_teacher(warmup_weights=Path("code/yolo26n.pt"))
 
-        # Verify all 3 epochs completed
-        self.assertEqual(len(results["history"]), 3)
+        # Verify epoch-0 baseline row plus all 3 epochs completed
+        self.assertEqual([h["epoch"] for h in results["history"]], [0, 1, 2, 3])
         for h in results["history"]:
             self.assertFalse(np.isnan(h["train_loss"]))
             self.assertTrue(np.isfinite(h["train_loss"]))

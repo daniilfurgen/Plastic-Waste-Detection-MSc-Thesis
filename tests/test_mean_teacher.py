@@ -27,6 +27,7 @@ if str(CODE_DIR) not in sys.path:
 from ssod.mean_teacher import (  # noqa: E402
     MeanTeacherConfig,
     compute_batch_loss,
+    configure_student_criterion,
     split_batch,
     update_teacher_ema,
 )
@@ -124,6 +125,14 @@ class TestMeanTeacherLoss(unittest.TestCase):
         loss_w, _ = compute_batch_loss(self.model.model, batch, unsupervised_weight=0.5)
         self.assertTrue(loss_w.requires_grad)
         loss_w.backward()
+
+    def test_configure_student_criterion_pins_e2e_gains(self):
+        criterion = configure_student_criterion(self.model.model)
+        self.assertIs(self.model.model.criterion, criterion)
+        # YOLO26 is end-to-end: gains must match the end of Ultralytics' decay schedule
+        self.assertAlmostEqual(criterion.o2m, criterion.final_o2m)
+        self.assertAlmostEqual(criterion.o2o, 1.0 - criterion.final_o2m)
+        self.assertGreater(criterion.o2o, criterion.o2m)
 
 
 class TestCOCOMetrics(unittest.TestCase):

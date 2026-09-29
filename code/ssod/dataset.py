@@ -67,9 +67,104 @@ class SSODAugmentConfig:
     # Ground-truth mosaic augmentation
     mosaic: float = 1.0
 
+    # Strong Student augmentation on pseudo-labeled images (weak/strong asymmetry)
+    pl_strong: bool = False
+    strong_hsv_h: float = 0.03
+    strong_hsv_s: float = 0.7
+    strong_hsv_v: float = 0.6
+    blur_p: float = 0.3
+    blur_max_kernel: int = 7
+    erase_p: float = 0.5
+    erase_max_patches: int = 3
+    erase_area: tuple[float, float] = (0.01, 0.08)
+    erase_drop_ratio: float = 0.5  # drop pseudo boxes at least this fraction erased
+
     # SSOD epoch policy
     tail_ratio: float = 0.25  # 25% of GT uniformly placed at tail of epoch
     close_mosaic_ratio: float = 0.10  # Disable mosaic during last 10% of epochs
+
+
+class RandomGaussianBlur:
+    """Blur the image with a random odd Gaussian kernel with probability p."""
+
+    def __init__(self, p: float = 0.3, max_kernel: int = 7) -> None:
+        self.p = p
+        self.max_kernel = max(3, max_kernel)
+
+    def __call__(self, labels: dict[str, Any]) -> dict[str, Any]:
+        if np.random.random() >= self.p:
+            return labels
+        kernel = int(np.random.choice(np.arange(3, self.max_kernel + 1, 2)))
+        labels["img"] = cv2.GaussianBlur(labels["img"], (kernel, kernel), 0)
+        return labels
+
+
+class BoxAwareRandomErasing:
+    """
+    Erase random rectangular patches with probability p and drop boxes whose area is
+    at least `drop_ratio` erased, so the Student is not asked to detect invisible objects.
+    Must run after RandomPerspective (instances in absolute pixel coordinates).
+    """
+
+    def __init__(
+        self,
+        p: float = 0.5,
+        max_patches: int = 3,
+        area: tuple[float, float] = (0.01, 0.08),
+        drop_ratio: float = 0.5,
+    ) -> None:
+        self.p = p
+        self.max_patches = max(1, max_patches)
+        self.area = area
+        self.drop_ratio = drop_ratio
+
+    def __call__(self, labels: dict[str, Any]) -> dict[str, Any]:
+        if np.random.random() >= self.p:
+            return labels
+
+        img = labels["img"]
+        h, w = img.shape[:2]
+        erased = np.zeros((h, w), dtype=bool)
+
+        # Place patches inside the image content, not on letterbox / affine border padding (value 114)
+        content = (img != 114).any(axis=2)
+        rows, cols = np.flatnonzero(content.any(axis=1)), np.flatnonzero(content.any(axis=0))
+        if len(rows) == 0 or len(cols) == 0:
+            return labels
+        cy0, cy1, cx0, cx1 = rows[0], rows[-1] + 1, cols[0], cols[-1] + 1
+        ch, cw = cy1 - cy0, cx1 - cx0
+
+        for _ in range(np.random.randint(1, self.max_patches + 1)):
+            patch_area = np.random.uniform(*self.area) * ch * cw
+            aspect = np.exp(np.random.uniform(np.log(0.3), np.log(3.3)))
+            ph = int(min(ch, round(math.sqrt(patch_area * aspect))))
+            pw = int(min(cw, round(math.sqrt(patch_area / aspect))))
+            if ph < 1 or pw < 1:
+                continue
+            y0 = cy0 + np.random.randint(0, ch - ph + 1)
+            x0 = cx0 + np.random.randint(0, cw - pw + 1)
+            img[y0 : y0 + ph, x0 : x0 + pw] = np.random.randint(
+                0, 256, (ph, pw, img.shape[2]), dtype=img.dtype
+            )
+            erased[y0 : y0 + ph, x0 : x0 + pw] = True
+
+        instances = labels["instances"]
+        if len(instances) > 0:
+            instances.convert_bbox(format="xyxy")
+            if instances.normalized:
+                instances.denormalize(w, h)
+            boxes = np.round(instances.bboxes).astype(int)
+            boxes[:, [0, 2]] = boxes[:, [0, 2]].clip(0, w)
+            boxes[:, [1, 3]] = boxes[:, [1, 3]].clip(0, h)
+            keep = np.ones(len(boxes), dtype=bool)
+            for k, (x1, y1, x2, y2) in enumerate(boxes):
+                if x2 > x1 and y2 > y1:
+                    keep[k] = erased[y1:y2, x1:x2].mean() < self.drop_ratio
+            labels["instances"] = instances[keep]
+            labels["cls"] = labels["cls"][keep]
+
+        labels["img"] = img
+        return labels
 
 
 def build_gt_transforms(
@@ -130,7 +225,8 @@ def build_pseudo_transforms(
     Build transforms for Pseudo-Labeled training dataset.
 
     Mosaic is NEVER included. Includes Scale & Translate (RandomPerspective),
-    RandomHSV, and RandomFlip(fliplr). All other augmentations disabled.
+    RandomHSV, and RandomFlip(fliplr). With `pl_strong`, HSV gains are raised and
+    Gaussian blur plus box-aware random erasing are added. All other augmentations disabled.
     """
     cfg = hyp or SSODAugmentConfig()
 
@@ -143,9 +239,24 @@ def build_pseudo_transforms(
         pre_transform=LetterBox(new_shape=(imgsz, imgsz)),
     )
 
+    if cfg.pl_strong:
+        # Erasing must directly follow the affine step: it detects padding by its exact fill value (114)
+        photometric = [
+            BoxAwareRandomErasing(
+                p=cfg.erase_p,
+                max_patches=cfg.erase_max_patches,
+                area=cfg.erase_area,
+                drop_ratio=cfg.erase_drop_ratio,
+            ),
+            RandomHSV(hgain=cfg.strong_hsv_h, sgain=cfg.strong_hsv_s, vgain=cfg.strong_hsv_v),
+            RandomGaussianBlur(p=cfg.blur_p, max_kernel=cfg.blur_max_kernel),
+        ]
+    else:
+        photometric = [RandomHSV(hgain=cfg.hsv_h, sgain=cfg.hsv_s, vgain=cfg.hsv_v)]
+
     transforms = [
         affine,
-        RandomHSV(hgain=cfg.hsv_h, sgain=cfg.hsv_s, vgain=cfg.hsv_v),
+        *photometric,
         RandomFlip(direction="horizontal", p=cfg.fliplr),
         Format(
             bbox_format="xywh",
@@ -520,8 +631,9 @@ class SSODSampler(Sampler[int]):
 
     Each epoch:
       1. Uniformly select 25% of GT items (without replacement) to place at the tail.
-      2. The remaining 75% of GT items are mixed and shuffled with all pseudo-labeled items.
-      3. Yields indices: [ Shuffled(75% GT + 100% Pseudo) ] + [ 25% GT tail ].
+      2. The remaining 75% of GT items (repeated `gt_repeat` times) are mixed and shuffled
+         with all pseudo-labeled items.
+      3. Yields indices: [ Shuffled(gt_repeat x 75% GT + 100% Pseudo) ] + [ 25% GT tail ].
     """
 
     def __init__(
@@ -530,12 +642,14 @@ class SSODSampler(Sampler[int]):
         pl_len: int,
         tail_ratio: float = 0.25,
         seed: int = 42,
+        gt_repeat: int = 1,
     ) -> None:
         super().__init__()
         self.gt_len = gt_len
         self.pl_len = pl_len
         self.tail_ratio = tail_ratio
         self.seed = seed
+        self.gt_repeat = max(1, gt_repeat)
         self.epoch = 0
         self._indices: list[int] = []
         self._generate_indices()
@@ -583,8 +697,8 @@ class SSODSampler(Sampler[int]):
         # Pseudo items have global index range [n_gt, n_gt + n_pl - 1]
         pl_indices = list(range(n_gt, n_gt + n_pl))
 
-        # 75% GT + all PL items shuffled together
-        head_pool = gt_head + pl_indices
+        # gt_repeat x 75% GT + all PL items shuffled together
+        head_pool = gt_head * self.gt_repeat + pl_indices
         rng.shuffle(head_pool)
 
         # Sequence: [ Shuffled Head Pool ] + [ Uniformly Selected GT Tail ]
@@ -726,6 +840,7 @@ class SSODDatasetHandler:
         tail_ratio: float = 0.25,
         close_mosaic_ratio: float = 0.10,
         filter_empty_pseudo: bool = True,
+        gt_repeat: int = 1,
         logger: logging.Logger | None = None,
     ) -> None:
         self.logger = logger or get_logger()
@@ -814,6 +929,7 @@ class SSODDatasetHandler:
             pl_len=len(self.pl_dataset),
             tail_ratio=self.tail_ratio,
             seed=self.seed,
+            gt_repeat=gt_repeat,
         )
 
         self.logger.info(

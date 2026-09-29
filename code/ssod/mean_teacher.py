@@ -257,10 +257,14 @@ class MeanTeacherConfig:
     tail_ratio: float = 0.25
     close_mosaic_ratio: float = 0.10
     unsupervised_weight: float = 1.0
+    unsupervised_warmup_epochs: int = 0  # linear lambda_u ramp-up; 0 disables
+    gt_repeat: int = 1  # times the GT head is repeated per epoch
+    pl_strong_aug: bool = False  # strong Student augmentation on pseudo-labeled images
 
     # Pseudo-labeling parameters
     pseudo_conf: float = 0.001
     pseudo_iou: float = 0.5
+    pseudo_fallback_threshold: float = 0.4
     pseudo_half: bool = True
     max_pseudo_images: int | None = None
     save_candidates: bool = False
@@ -410,6 +414,23 @@ def split_batch(batch: dict[str, Any], mask: torch.Tensor) -> dict[str, Any]:
         new_batch["batch_idx"] = torch.empty((0,), device=batch["img"].device)
 
     return new_batch
+
+
+def configure_student_criterion(model: nn.Module) -> Any:
+    """
+    Build the Student criterion explicitly and pin YOLO26 E2E loss gains to their end-of-warm-up values.
+
+    Ultralytics' E2ELoss starts at o2m=0.8 / o2o=0.2 and relies on the trainer calling criterion.update()
+    every epoch to decay towards o2m=final_o2m (0.1). The custom SSL loop never calls update(), so a lazily
+    created criterion would under-weight the one-to-one head used at inference for the whole SSL phase.
+    Must be called after the model is on its target device and model.args is set.
+    """
+    criterion = model.init_criterion()
+    if hasattr(criterion, "final_o2m"):
+        criterion.o2m = criterion.final_o2m
+        criterion.o2o = max(criterion.total - criterion.o2m, 0.0)
+    model.criterion = criterion
+    return criterion
 
 
 def compute_batch_loss(
@@ -800,10 +821,12 @@ class MeanTeacherTrainer:
                             setattr(self.config, k, str(v))
                         elif k in ("gt_data_yaml", "pl_images_dir", "pl_labels_dir") and v:
                             setattr(self.config, k, Path(v).resolve())
-                        elif k in ("unsupervised_weight", "ema_decay", "tail_ratio", "close_mosaic_ratio", "lr0", "lrf"):
+                        elif k in ("unsupervised_weight", "ema_decay", "tail_ratio", "close_mosaic_ratio", "lr0", "lrf", "pseudo_fallback_threshold"):
                             setattr(self.config, k, float(v))
-                        elif k in ("ssl_epochs", "warmup_epochs", "batch_size", "imgsz", "workers"):
+                        elif k in ("ssl_epochs", "warmup_epochs", "batch_size", "imgsz", "workers", "unsupervised_warmup_epochs", "gt_repeat"):
                             setattr(self.config, k, int(v))
+                        elif k == "pl_strong_aug":
+                            setattr(self.config, k, bool(v))
 
             if self.config.coco_gt_path is None:
                 self.config.coco_gt_path = discover_coco_gt_path(self.config.gt_data_yaml)
@@ -1089,6 +1112,12 @@ class MeanTeacherTrainer:
         for p in teacher.model.parameters():
             p.requires_grad = False
 
+        criterion = configure_student_criterion(student.model)
+        if hasattr(criterion, "o2m"):
+            self.logger.info(
+                f"Student E2E loss gains: o2m={criterion.o2m:.2f}, o2o={criterion.o2o:.2f}"
+            )
+
         # Vectorized EMA tracker
         ema = VectorizedEMA(
             teacher_model=teacher.model,
@@ -1106,6 +1135,7 @@ class MeanTeacherTrainer:
             workers=self.config.workers,
             conf=self.config.pseudo_conf,
             iou_threshold=self.config.pseudo_iou,
+            fallback_threshold=self.config.pseudo_fallback_threshold,
             device=self.device,
             logger=self.logger,
         )
@@ -1113,6 +1143,7 @@ class MeanTeacherTrainer:
         augment_cfg = SSODAugmentConfig(
             tail_ratio=self.config.tail_ratio,
             close_mosaic_ratio=self.config.close_mosaic_ratio,
+            pl_strong=self.config.pl_strong_aug,
         )
 
         dataset_handler = SSODDatasetHandler(
@@ -1124,6 +1155,9 @@ class MeanTeacherTrainer:
             workers=self.config.workers,
             seed=self.config.seed,
             augment_cfg=augment_cfg,
+            tail_ratio=self.config.tail_ratio,
+            close_mosaic_ratio=self.config.close_mosaic_ratio,
+            gt_repeat=self.config.gt_repeat,
             logger=self.logger,
         )
 
@@ -1231,6 +1265,46 @@ class MeanTeacherTrainer:
                     f"Synchronized and aligned results.csv to last completed epoch {start_epoch}."
                 )
 
+        def append_result(record: dict[str, Any]) -> None:
+            nonlocal csv_header_written
+            fieldnames = list(record.keys())
+            if not csv_header_written:
+                with open(results_csv, "w", encoding="utf-8") as f:
+                    f.write(",".join(fieldnames) + "\n")
+                csv_header_written = True
+            with open(results_csv, "a", encoding="utf-8") as f:
+                f.write(",".join(str(record.get(k, 0.0)) for k in fieldnames) + "\n")
+
+        # Baseline: evaluate the starting Teacher with the same evaluator as SSL epochs
+        if resume_target is None and start_epoch == 0:
+            self.logger.info("Evaluating starting Teacher (epoch 0 baseline)...")
+            teacher.save(str(last_path))
+            baseline_metrics = evaluate_model_coco(
+                model=YOLO(str(last_path)),
+                gt_data_yaml=self.config.gt_data_yaml,
+                coco_gt_path=self.config.coco_gt_path,
+                imgsz=self.config.imgsz,
+                batch_size=self.config.batch_size * 2,
+                device=self.device,
+                save_dir=self.exp_dir / "val" / "val_epoch_0",
+                logger=self.logger,
+            )
+            self.logger.info(
+                f"Epoch 0 Baseline: Teacher mAP50={baseline_metrics.get('metrics/mAP50(B)', 0.0):.4f}, "
+                f"mAP50-95={baseline_metrics.get('metrics/mAP50-95(B)', 0.0):.4f}"
+            )
+            baseline_record = {
+                "epoch": 0,
+                "train_loss": 0.0,
+                "epoch_time": 0.0,
+                "threshold/small": 0.0,
+                "threshold/medium": 0.0,
+                "threshold/large": 0.0,
+                **baseline_metrics,
+            }
+            training_history.append(baseline_record)
+            append_result(baseline_record)
+
         # 5. Training Loop with graceful KeyboardInterrupt handling
         try:
             for epoch in range(start_epoch, total_epochs):
@@ -1291,6 +1365,12 @@ class MeanTeacherTrainer:
                 )
 
                 # C. Student Training over Batches
+                unsupervised_weight = self.config.unsupervised_weight
+                if self.config.unsupervised_warmup_epochs > 0:
+                    ramp = min(1.0, (epoch + 1) / self.config.unsupervised_warmup_epochs)
+                    unsupervised_weight *= ramp
+                    self.logger.info(f"Unsupervised weight (ramp-up): {unsupervised_weight:.4f}")
+
                 student.model.train()
                 train_losses: list[float] = []
 
@@ -1320,7 +1400,7 @@ class MeanTeacherTrainer:
                             loss, loss_items = compute_batch_loss(
                                 model=student.model,
                                 batch=batch,
-                                unsupervised_weight=self.config.unsupervised_weight,
+                                unsupervised_weight=unsupervised_weight,
                             )
 
                         if use_scaler:
@@ -1393,15 +1473,7 @@ class MeanTeacherTrainer:
                 }
                 training_history.append(record)
 
-                # Append to results.csv
-                fieldnames = list(record.keys())
-                if not csv_header_written:
-                    with open(results_csv, "w", encoding="utf-8") as f:
-                        f.write(",".join(fieldnames) + "\n")
-                    csv_header_written = True
-
-                with open(results_csv, "a", encoding="utf-8") as f:
-                    f.write(",".join(str(record.get(k, 0.0)) for k in fieldnames) + "\n")
+                append_result(record)
 
                 # Checkpoint management
                 if fitness > best_fitness:
@@ -1541,8 +1613,29 @@ def main(
     unsupervised_weight: float = typer.Option(
         1.0, "--unsupervised-weight", help="Weight lambda_u for pseudo loss."
     ),
+    unsupervised_warmup_epochs: int = typer.Option(
+        0,
+        "--unsupervised-warmup-epochs",
+        help="Epochs of linear ramp-up for lambda_u (0 disables).",
+    ),
+    tail_ratio: float = typer.Option(
+        0.25, "--tail-ratio", help="Fraction of GT placed at the tail of each epoch."
+    ),
+    gt_repeat: int = typer.Option(
+        1, "--gt-repeat", help="Times the GT head is repeated in each epoch.", min=1
+    ),
+    pl_strong_aug: bool = typer.Option(
+        False,
+        "--pl-strong-aug/--no-pl-strong-aug",
+        help="Strong Student augmentation (HSV, blur, erasing) on pseudo-labeled images.",
+    ),
     max_pseudo_images: Optional[int] = typer.Option(
         None, "--max-pseudo-images", help="Max unlabeled images for pseudo-labeling."
+    ),
+    pseudo_fallback_threshold: float = typer.Option(
+        0.4,
+        "--pseudo-fallback-threshold",
+        help="Pseudo-label score threshold for a size bin whose score histogram has no valley.",
     ),
     save_candidates: bool = typer.Option(
         False,
@@ -1621,9 +1714,14 @@ def main(
     chosen_device = pick_val("device", device, "device", None)
     chosen_ema_decay = float(pick_val("ema_decay", ema_decay, "ema_decay", 0.999))
     chosen_unsupervised_weight = float(pick_val("unsupervised_weight", unsupervised_weight, "unsupervised_weight", 1.0))
+    chosen_unsupervised_warmup_epochs = int(pick_val("unsupervised_warmup_epochs", unsupervised_warmup_epochs, "unsupervised_warmup_epochs", 0))
+    chosen_tail_ratio = float(pick_val("tail_ratio", tail_ratio, "tail_ratio", 0.25))
+    chosen_gt_repeat = int(pick_val("gt_repeat", gt_repeat, "gt_repeat", 1))
+    chosen_pl_strong_aug = bool(pick_val("pl_strong_aug", pl_strong_aug, "pl_strong_aug", False))
     chosen_max_pseudo_images = pick_val("max_pseudo_images", max_pseudo_images, "max_pseudo_images", None)
     if chosen_max_pseudo_images is not None:
         chosen_max_pseudo_images = int(chosen_max_pseudo_images)
+    chosen_pseudo_fallback_threshold = float(pick_val("pseudo_fallback_threshold", pseudo_fallback_threshold, "pseudo_fallback_threshold", 0.4))
     chosen_save_candidates = bool(pick_val("save_candidates", save_candidates, "save_candidates", False))
 
     cfg = MeanTeacherConfig(
@@ -1642,7 +1740,12 @@ def main(
         device=chosen_device,
         ema_decay=chosen_ema_decay,
         unsupervised_weight=chosen_unsupervised_weight,
+        unsupervised_warmup_epochs=chosen_unsupervised_warmup_epochs,
+        tail_ratio=chosen_tail_ratio,
+        gt_repeat=chosen_gt_repeat,
+        pl_strong_aug=chosen_pl_strong_aug,
         max_pseudo_images=chosen_max_pseudo_images,
+        pseudo_fallback_threshold=chosen_pseudo_fallback_threshold,
         save_candidates=chosen_save_candidates,
         runs_dir=project,
         experiment_name=name,

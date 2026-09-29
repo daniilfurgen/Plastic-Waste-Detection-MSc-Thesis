@@ -128,17 +128,43 @@ def assign_size_bin(w: float, h: float) -> str:
 
 def ground_threshold(
     scores: Sequence[float] | np.ndarray,
-    lo: float = 0.5,
+    lo: float = 0.0,
     hi: float = 1.0,
     n_bins: int = 21,
-) -> float:
+    smooth: int = 3,
+) -> float | None:
+    """
+    Locate the valley between the low-score (noise) mode and the high-score (object) mode.
+
+    The histogram must span the whole candidate score range: the noise mode sits near the
+    candidate confidence floor, so clipping the range (e.g. to [0.5, 1.0]) removes the valley.
+    The two highest local maxima of a moving-average-smoothed histogram are taken as the modes
+    and the centre of the lowest bin between them is returned.
+    Returns None when there is no valley (fewer than two modes, or a flat valley).
+    """
     hist, bin_edges = np.histogram(scores, bins=n_bins, range=(lo, hi))
+    if hist.sum() == 0:
+        return None
 
-    left_max_index = np.argmax(hist[: len(hist) // 2])
-    right_max_index = np.argmax(hist[len(hist) // 2 :]) + len(hist) // 2
+    counts = hist.astype(np.float64)
+    if smooth > 1:
+        padded = np.pad(counts, smooth // 2, mode="edge")
+        counts = np.convolve(padded, np.ones(smooth) / smooth, mode="valid")
 
-    local_min_index = np.argmin(hist[left_max_index:right_max_index]) + left_max_index
-    return float(bin_edges[local_min_index])
+    left_neighbours = np.concatenate(([-np.inf], counts[:-1]))
+    right_neighbours = np.concatenate((counts[1:], [-np.inf]))
+    peaks = np.flatnonzero(
+        (counts > 0) & (counts >= left_neighbours) & (counts >= right_neighbours)
+    )
+    if len(peaks) < 2:
+        return None
+
+    first, second = sorted(peaks[np.argsort(counts[peaks])[-2:]])
+    valley_index = int(np.argmin(counts[first : second + 1])) + first
+    if counts[valley_index] >= min(counts[first], counts[second]):
+        return None
+
+    return float((bin_edges[valley_index] + bin_edges[valley_index + 1]) / 2.0)
 
 
 def generate_candidates_multiview(
@@ -273,6 +299,7 @@ class PseudoLabelGenerator:
         workers: int = 4,
         conf: float = 0.001,
         iou_threshold: float = 0.5,
+        fallback_threshold: float = 0.4,
         device: str | torch.device | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -286,6 +313,7 @@ class PseudoLabelGenerator:
         self.workers = max(1, workers)
         self.conf = conf
         self.iou_threshold = iou_threshold
+        self.fallback_threshold = fallback_threshold
         self.device = device
         self.logger = logger or get_logger()
         self._cached_images_dir: Path | None = None
@@ -497,20 +525,29 @@ class PseudoLabelGenerator:
                 .to_numpy()
                 .astype(float)
             )
-            opt_thresh = ground_threshold(sb_scores)
+            opt_thresh = ground_threshold(sb_scores, lo=self.conf)
+            if opt_thresh is None:
+                self.logger.warning(
+                    f"Size bin '{sb}': no score valley found (count={len(sb_scores)}); "
+                    f"using fallback threshold={self.fallback_threshold:.4f}"
+                )
+                opt_thresh = self.fallback_threshold
+            else:
+                self.logger.info(
+                    f"Size bin '{sb}': count={len(sb_scores)}, ground threshold={opt_thresh:.4f}"
+                )
             thresholds[sb] = opt_thresh
-            self.logger.info(
-                f"Size bin '{sb}': count={len(sb_scores)}, ground threshold={opt_thresh:.4f}"
-            )
             filter_expr = filter_expr | (
                 (pl.col("size_bin") == sb) & (pl.col("score") >= opt_thresh)
             )
 
         # 5. Filter candidates
         filtered_df = candidates_df.filter(filter_expr)
+        labeled_images = filtered_df["image_stem"].n_unique()
         self.logger.info(
             f"Filtered candidates from {total_candidates} to {len(filtered_df)} "
-            f"using ground thresholds."
+            f"using ground thresholds ({labeled_images} labeled images, "
+            f"{len(filtered_df) / max(1, labeled_images):.2f} boxes/image)."
         )
 
         # 6. Save YOLO format annotations (omit empty txt files)
@@ -584,6 +621,7 @@ def generate_pseudo_labels(
     workers: int = 4,
     conf: float = 0.001,
     iou: float = 0.5,
+    fallback_threshold: float = 0.4,
     device: str | torch.device | None = None,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
@@ -595,6 +633,7 @@ def generate_pseudo_labels(
         workers=workers,
         conf=conf,
         iou_threshold=iou,
+        fallback_threshold=fallback_threshold,
         device=device,
         logger=logger,
     )
@@ -681,6 +720,13 @@ def main(
         min=0.0,
         max=1.0,
     ),
+    fallback_threshold: float = typer.Option(
+        0.4,
+        "--fallback-threshold",
+        help="Score threshold used for a size bin when its score histogram has no valley.",
+        min=0.0,
+        max=1.0,
+    ),
     device: Optional[str] = typer.Option(
         None,
         "--device",
@@ -700,6 +746,7 @@ def main(
         workers=workers,
         conf=conf,
         iou=iou,
+        fallback_threshold=fallback_threshold,
         device=device,
     )
 
