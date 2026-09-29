@@ -128,7 +128,7 @@ def assign_size_bin(w: float, h: float) -> str:
 
 def ground_threshold(
     scores: Sequence[float] | np.ndarray,
-    lo: float = 0.0,
+    lo: float = 0.5,
     hi: float = 1.0,
     n_bins: int = 21,
 ) -> float:

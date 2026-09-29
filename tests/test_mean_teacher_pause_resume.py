@@ -193,8 +193,42 @@ class TestMeanTeacherKeyboardInterrupt(unittest.TestCase):
         self.test_dir = Path(tempfile.mkdtemp())
         self.runs_dir = self.test_dir / "runs"
         self.exp_name = "interrupt_exp"
+
+        import cv2
+        import numpy as np
+
+        train_img_dir = self.test_dir / "data" / "train" / "images"
+        train_lbl_dir = self.test_dir / "data" / "train" / "labels"
+        val_img_dir = self.test_dir / "data" / "val" / "images"
+        val_lbl_dir = self.test_dir / "data" / "val" / "labels"
+        pl_img_dir = self.test_dir / "data" / "pl" / "images"
+        pl_lbl_dir = self.test_dir / "data" / "pl" / "labels"
+        for d in (train_img_dir, train_lbl_dir, val_img_dir, val_lbl_dir, pl_img_dir, pl_lbl_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        dummy_img = np.zeros((64, 64, 3), dtype=np.uint8)
+        for i in range(2):
+            cv2.imwrite(str(train_img_dir / f"train_{i}.jpg"), dummy_img)
+            cv2.imwrite(str(val_img_dir / f"val_{i}.jpg"), dummy_img)
+            cv2.imwrite(str(pl_img_dir / f"pl_{i}.jpg"), dummy_img)
+            (train_lbl_dir / f"train_{i}.txt").write_text("0 0.5 0.5 0.2 0.2\n")
+            (val_lbl_dir / f"val_{i}.txt").write_text("0 0.5 0.5 0.2 0.2\n")
+            (pl_lbl_dir / f"pl_{i}.txt").write_text("")
+
+        dummy_yaml = self.test_dir / "data.yaml"
+        dummy_yaml.write_text(
+            f"path: {self.test_dir / 'data'}\n"
+            f"train: train/images\n"
+            f"val: val/images\n"
+            f"nc: 1\n"
+            f"names: ['plastic']\n"
+        )
+
         self.cfg = MeanTeacherConfig(
             model_name="yolo26n.pt",
+            gt_data_yaml=dummy_yaml,
+            pl_images_dir=pl_img_dir,
+            pl_labels_dir=pl_lbl_dir,
             runs_dir=self.runs_dir,
             experiment_name=self.exp_name,
             ssl_epochs=3,
@@ -273,6 +307,115 @@ class TestMeanTeacherKeyboardInterrupt(unittest.TestCase):
 
         # Verify that runs_dir/exp was NOT created
         self.assertFalse((self.runs_dir / "exp").exists())
+
+    def test_rich_checkpoint_save_and_load_with_custom_nc(self):
+        """Verify saving and loading rich checkpoints when nc=1 (e.g. FloW-img) works without size mismatch."""
+        from ultralytics.nn.tasks import DetectionModel
+
+        m_student = DetectionModel(cfg="yolo26n.yaml", nc=1, verbose=False)
+        m_teacher = DetectionModel(cfg="yolo26n.yaml", nc=1, verbose=False)
+        m_student.nc = 1
+        m_teacher.nc = 1
+        student = YOLO("yolo26n.yaml")
+        student.model = m_student
+        teacher = YOLO("yolo26n.yaml")
+        teacher.model = m_teacher
+
+        optimizer = torch.optim.AdamW(student.model.parameters(), lr=0.001)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
+
+        save_path = self.trainer.weights_dir / "custom_nc_checkpoint.pt"
+        self.trainer.save_checkpoint(
+            path=save_path,
+            epoch=5,
+            student=student,
+            teacher=teacher,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            scaler=None,
+            best_fitness=0.55,
+            best_epoch=4,
+            training_history=[],
+        )
+
+        # Load back
+        loaded = self.trainer.load_checkpoint(save_path)
+        self.assertEqual(loaded["format"], "rich")
+        self.assertEqual(loaded["start_epoch"], 5)
+        self.assertEqual(loaded["student"].model.nc, 1)
+        self.assertEqual(loaded["teacher"].model.nc, 1)
+
+    def test_load_actual_paused_checkpoint(self):
+        """Verify that the user's actual paused.pt loads cleanly without RuntimeError."""
+        paused_pt = REPO_ROOT / "runs/mean_teacher/YOLO26m-SSOD-100-150/weights/paused.pt"
+        if not paused_pt.is_file():
+            self.skipTest("paused.pt not present on disk")
+
+        loaded = self.trainer.load_checkpoint(paused_pt)
+        self.assertEqual(loaded["format"], "rich")
+        self.assertEqual(loaded["start_epoch"], 103)
+        self.assertEqual(loaded["student"].model.nc, 1)
+        self.assertEqual(loaded["teacher"].model.nc, 1)
+        self.assertIsNotNone(self.trainer.config.coco_gt_path)
+        self.assertTrue(self.trainer.config.coco_gt_path.exists())
+
+
+class TestMeanTeacherArgsPersistence(unittest.TestCase):
+    """Test args.yaml persistence and CLI parameter override on resume."""
+
+    def setUp(self):
+        self.test_dir = Path(tempfile.mkdtemp())
+        self.runs_dir = self.test_dir / "runs"
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_save_and_load_config_yaml(self):
+        from ssod.mean_teacher import load_config_yaml, save_config_yaml
+
+        cfg = MeanTeacherConfig(
+            model_name="yolo26m.pt",
+            batch_size=32,
+            runs_dir=self.runs_dir,
+            experiment_name="yaml_test",
+        )
+        yaml_file = self.runs_dir / "yaml_test" / "args.yaml"
+        save_config_yaml(cfg, yaml_file)
+        self.assertTrue(yaml_file.is_file())
+
+        loaded = load_config_yaml(yaml_file)
+        self.assertEqual(loaded["model_name"], "yolo26m.pt")
+        self.assertEqual(loaded["batch_size"], 32)
+        self.assertEqual(loaded["experiment_name"], "yaml_test")
+
+
+class TestSSODDetectionValidatorAndLoss(unittest.TestCase):
+    """Test SSODDetectionValidator validation loss computation and COCO evaluation."""
+
+    def test_validation_loss_is_computed(self):
+        """Verify evaluate_model_coco produces non-zero validation loss metrics."""
+        from ssod.mean_teacher import evaluate_model_coco
+
+        best_pt = REPO_ROOT / "runs/mean_teacher/YOLO26m-SSOD-100-150/weights/best.pt"
+        if not best_pt.is_file():
+            self.skipTest("best.pt checkpoint not found for validation loss test")
+
+        model = YOLO(str(best_pt))
+        metrics = evaluate_model_coco(
+            model=model,
+            gt_data_yaml=REPO_ROOT / "data/flow_img.yaml",
+            coco_gt_path=None,  # auto-discovers
+            imgsz=320,
+            batch_size=32,
+            device="cuda:0" if torch.cuda.is_available() else "cpu",
+        )
+
+        self.assertIn("val/box_loss", metrics)
+        self.assertIn("val/cls_loss", metrics)
+        self.assertIn("val/dfl_loss", metrics)
+        self.assertGreater(metrics["val/box_loss"], 0.0)
+        self.assertGreater(metrics["val/cls_loss"], 0.0)
+        self.assertIn("coco/mAP_50_95", metrics)
 
 
 if __name__ == "__main__":

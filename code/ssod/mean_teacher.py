@@ -51,6 +51,8 @@ if TYPE_CHECKING:
     import torch.nn as nn
     from tqdm import tqdm
     from ultralytics import YOLO
+    from ultralytics.models.yolo.detect import DetectionValidator
+    from ultralytics.nn.tasks import DetectionModel
     from ultralytics.utils import DEFAULT_CFG_DICT, IterableSimpleNamespace
     from ssod.dataset import SSODAugmentConfig, SSODDatasetHandler
     from ssod.metrics import evaluate_coco
@@ -62,6 +64,8 @@ nn: Any = None
 np: Any = None
 tqdm: Any = None
 YOLO: Any = None
+DetectionModel: Any = None
+DetectionValidator: Any = None
 DEFAULT_CFG_DICT: Any = None
 IterableSimpleNamespace: Any = None
 SSODAugmentConfig: Any = None
@@ -72,7 +76,7 @@ PseudoLabelGenerator: Any = None
 
 def _load_heavy_dependencies() -> None:
     """Lazily load heavy scientific and CV libraries to ensure instantaneous CLI --help."""
-    global torch, nn, np, tqdm, YOLO, DEFAULT_CFG_DICT, IterableSimpleNamespace
+    global torch, nn, np, tqdm, YOLO, DetectionModel, DetectionValidator, DEFAULT_CFG_DICT, IterableSimpleNamespace
     global SSODAugmentConfig, SSODDatasetHandler, evaluate_coco, PseudoLabelGenerator
 
     if torch is not None:
@@ -83,6 +87,8 @@ def _load_heavy_dependencies() -> None:
     import torch.nn as _nn
     from tqdm import tqdm as _tqdm  # type: ignore[import-untyped]
     from ultralytics import YOLO as _YOLO
+    from ultralytics.models.yolo.detect import DetectionValidator as _DetectionValidator
+    from ultralytics.nn.tasks import DetectionModel as _DetectionModel
     from ultralytics.utils import (
         DEFAULT_CFG_DICT as _DEFAULT_CFG_DICT,
         IterableSimpleNamespace as _IterableSimpleNamespace,
@@ -108,6 +114,8 @@ def _load_heavy_dependencies() -> None:
     np = _np
     tqdm = _tqdm
     YOLO = _YOLO
+    DetectionModel = _DetectionModel
+    DetectionValidator = _DetectionValidator
     DEFAULT_CFG_DICT = _DEFAULT_CFG_DICT
     IterableSimpleNamespace = _IterableSimpleNamespace
     SSODAugmentConfig = _SSODAugmentConfig
@@ -122,6 +130,65 @@ def __getattr__(name: str) -> Any:
     if name in globals() and globals()[name] is not None:
         return globals()[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def discover_coco_gt_path(gt_data_yaml: Path | str | None) -> Path | None:
+    """Auto-discover reference COCO annotations JSON path from gt_data_yaml or standard locations."""
+    candidates: list[Path] = []
+    if gt_data_yaml is not None:
+        yaml_path = Path(gt_data_yaml).resolve()
+        candidates.extend([
+            yaml_path.parent / "flow_img" / "val" / "annotations.json",
+            yaml_path.parent / "val" / "annotations.json",
+        ])
+        if yaml_path.is_file():
+            try:
+                import yaml
+                with open(yaml_path, "r", encoding="utf-8") as f:
+                    ydata = yaml.safe_load(f)
+                if isinstance(ydata, dict) and "path" in ydata:
+                    base_path = Path(ydata["path"])
+                    candidates.extend([
+                        base_path / "val" / "annotations.json",
+                        base_path / "annotations.json",
+                    ])
+            except Exception:
+                pass
+    candidates.append(Path("data/flow_img/val/annotations.json").resolve())
+
+    for cand in candidates:
+        if cand.is_file():
+            return cand
+    return None
+
+
+def save_config_yaml(config: MeanTeacherConfig, path: Path | str) -> None:
+    """Save MeanTeacherConfig to YAML file."""
+    import yaml
+    p = Path(path).resolve()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    cfg_dict = asdict(config)
+    serializable: dict[str, Any] = {}
+    for k, v in cfg_dict.items():
+        if isinstance(v, Path):
+            serializable[k] = str(v)
+        elif isinstance(v, (int, float, bool, str)) or v is None:
+            serializable[k] = v
+        else:
+            serializable[k] = str(v)
+    with open(p, "w", encoding="utf-8") as f:
+        yaml.safe_dump(serializable, f, sort_keys=False, default_flow_style=False)
+
+
+def load_config_yaml(path: Path | str) -> dict[str, Any]:
+    """Load configuration dictionary from YAML file."""
+    import yaml
+    p = Path(path).resolve()
+    if not p.is_file():
+        raise FileNotFoundError(f"Config file not found: {p}")
+    with open(p, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    return data if isinstance(data, dict) else {}
 
 
 app = typer.Typer(
@@ -208,7 +275,9 @@ class MeanTeacherConfig:
         self.gt_data_yaml = Path(self.gt_data_yaml).resolve()
         self.pl_images_dir = Path(self.pl_images_dir).resolve()
         self.pl_labels_dir = Path(self.pl_labels_dir).resolve()
-        if self.coco_gt_path is not None:
+        if self.coco_gt_path is None:
+            self.coco_gt_path = discover_coco_gt_path(self.gt_data_yaml)
+        elif self.coco_gt_path is not None:
             self.coco_gt_path = Path(self.coco_gt_path).resolve()
         if self.warmup_weights is not None:
             self.warmup_weights = Path(self.warmup_weights).resolve()
@@ -397,6 +466,62 @@ def compute_batch_loss(
         return loss_sum, loss_tuple[1]
 
 
+class SSODDetectionValidator:
+    """Stub wrapper allowing SSODDetectionValidator to be referenced before heavy imports."""
+    pass
+
+
+def _create_ssod_detection_validator() -> type:
+    """Instantiate SSODDetectionValidator subclassing DetectionValidator on-demand."""
+    _load_heavy_dependencies()
+
+    class _SSODDetectionValidator(DetectionValidator):
+        """
+        Custom DetectionValidator that computes real validation loss (box, cls, dfl)
+        on the GT validation split while retaining full predictions.json export for pycocotools COCO evaluation.
+        """
+
+        def __call__(self, trainer=None, model=None):
+            self._raw_model = deepcopy(model) if model is not None else None
+            return super().__call__(trainer=trainer, model=model)
+
+        def init_metrics(self, model):
+            super().init_metrics(model)
+            self.val_loss = torch.zeros(3, device=self.device)
+            self.val_loss_count = 0
+            if self._raw_model is not None:
+                self._raw_model = self._raw_model.to(self.device)
+                cfg = deepcopy(DEFAULT_CFG_DICT)
+                self._raw_model.args = IterableSimpleNamespace(**cfg)
+                self._raw_model.criterion = None
+
+        def update_metrics(self, preds, batch):
+            super().update_metrics(preds, batch)
+            if self._raw_model is not None:
+                if getattr(self.args, "half", False) and self.device.type != "cpu":
+                    self._raw_model.half()
+                else:
+                    self._raw_model.float()
+                with torch.no_grad():
+                    loss_tuple = self._raw_model.loss(batch)
+                    self.val_loss += loss_tuple[1].detach()
+                    self.val_loss_count += 1
+
+        def finalize_metrics(self):
+            super().finalize_metrics()
+            if self.val_loss_count > 0:
+                mean_loss = (self.val_loss / self.val_loss_count).cpu().tolist()
+                loss_dict = {
+                    "val/box_loss": float(mean_loss[0]),
+                    "val/cls_loss": float(mean_loss[1]),
+                    "val/dfl_loss": float(mean_loss[2]),
+                }
+                self.metrics.val_loss = loss_dict
+                self.metrics.results_dict.update(loss_dict)
+
+    return _SSODDetectionValidator
+
+
 def evaluate_model_coco(
     model: YOLO,
     gt_data_yaml: Path | str,
@@ -409,11 +534,14 @@ def evaluate_model_coco(
 ) -> dict[str, float]:
     """
     Evaluate YOLO model on validation split, extracting Ultralytics metrics,
-    computing fitness, and evaluating pycocotools COCO metrics.
+    computing real validation loss, fitness, and evaluating pycocotools COCO metrics.
     """
     _load_heavy_dependencies()
     log = logger or get_logger()
+
+    validator_cls = _create_ssod_detection_validator()
     val_kwargs: dict[str, Any] = {
+        "validator": validator_cls,
         "data": str(gt_data_yaml),
         "split": "val",
         "save_json": True,
@@ -431,6 +559,7 @@ def evaluate_model_coco(
 
     val_results = model.val(**val_kwargs)
     res_dict = val_results.results_dict
+    val_loss_dict = getattr(val_results, "val_loss", {})
 
     # Extract Ultralytics metrics & fitness
     metrics: dict[str, float] = {
@@ -438,9 +567,9 @@ def evaluate_model_coco(
         "metrics/recall(B)": float(res_dict.get("metrics/recall(B)", 0.0)),
         "metrics/mAP50(B)": float(res_dict.get("metrics/mAP50(B)", 0.0)),
         "metrics/mAP50-95(B)": float(res_dict.get("metrics/mAP50-95(B)", 0.0)),
-        "val/box_loss": float(res_dict.get("val/box_loss", 0.0)),
-        "val/cls_loss": float(res_dict.get("val/cls_loss", 0.0)),
-        "val/dfl_loss": float(res_dict.get("val/dfl_loss", 0.0)),
+        "val/box_loss": float(val_loss_dict.get("val/box_loss", res_dict.get("val/box_loss", 0.0))),
+        "val/cls_loss": float(val_loss_dict.get("val/cls_loss", res_dict.get("val/cls_loss", 0.0))),
+        "val/dfl_loss": float(val_loss_dict.get("val/dfl_loss", res_dict.get("val/dfl_loss", 0.0))),
         "fitness": float(
             res_dict.get(
                 "fitness",
@@ -450,11 +579,16 @@ def evaluate_model_coco(
         ),
     }
 
+    # Auto-discover COCO annotations if not provided
+    effective_coco_gt = coco_gt_path
+    if effective_coco_gt is None:
+        effective_coco_gt = discover_coco_gt_path(gt_data_yaml)
+
     # Evaluate COCO metrics if COCO ground truth JSON is available
-    if coco_gt_path is not None and Path(coco_gt_path).exists():
+    if effective_coco_gt is not None and Path(effective_coco_gt).exists():
         preds_json = Path(val_results.save_dir) / "predictions.json"
         coco_res = evaluate_coco(
-            coco_gt_path=coco_gt_path,
+            coco_gt_path=effective_coco_gt,
             predictions_path=preds_json,
             logger=log,
         )
@@ -496,6 +630,29 @@ class MeanTeacherTrainer:
         self.logger.info(
             f"Initialized MeanTeacherTrainer on device={self.device} (runs_dir={self.exp_dir})"
         )
+        if not (self.exp_dir / "args.yaml").exists():
+            self.save_args()
+
+    def save_args(self) -> None:
+        """Serialize current MeanTeacherConfig to runs_dir/args.yaml."""
+        args_path = self.exp_dir / "args.yaml"
+        save_config_yaml(self.config, args_path)
+
+    @staticmethod
+    def _infer_nc_from_state_dict(state_dict: dict[str, Any]) -> int:
+        """Infer number of classes nc from state_dict classification head weights."""
+        for key in reversed(list(state_dict.keys())):
+            if "cv3" in key and "weight" in key and hasattr(state_dict[key], "shape") and state_dict[key].ndim == 4:
+                return int(state_dict[key].shape[0])
+        return 1
+
+    @staticmethod
+    def _resolve_model_yaml(model_name: str) -> str:
+        """Resolve model name (e.g. yolo26m.pt) to model yaml name (e.g. yolo26m.yaml)."""
+        stem = Path(model_name).stem
+        if not stem.endswith(".yaml"):
+            return f"{stem}.yaml"
+        return stem
 
     def save_checkpoint(
         self,
@@ -546,6 +703,8 @@ class MeanTeacherTrainer:
             "best_epoch": best_epoch,
             "training_history": deepcopy(training_history),
             "config": asdict(self.config),
+            "nc": getattr(student.model, "nc", 1),
+            "model_name": self.config.model_name,
             "warmup_weights": str(warmup_weights)
             if warmup_weights is not None
             else None,
@@ -555,6 +714,7 @@ class MeanTeacherTrainer:
 
         torch.save(checkpoint, tmp_dest)
         tmp_dest.replace(dest)
+        self.save_args()
 
     @staticmethod
     def resolve_checkpoint_path(resume_target: Path | str) -> Path:
@@ -617,9 +777,68 @@ class MeanTeacherTrainer:
             best_epoch = int(raw_ckpt.get("best_epoch", -1))
             training_history = list(raw_ckpt.get("training_history", []))
 
-            # Initialize models
-            teacher = YOLO(self.config.model_name)
-            student = YOLO(self.config.model_name)
+            # Restore config if available in checkpoint or args.yaml
+            saved_cfg = raw_ckpt.get("config")
+            args_yaml = self.exp_dir / "args.yaml"
+            if args_yaml.is_file():
+                try:
+                    loaded_yaml_cfg = load_config_yaml(args_yaml)
+                    if saved_cfg is None:
+                        saved_cfg = loaded_yaml_cfg
+                    elif isinstance(saved_cfg, dict):
+                        saved_cfg = {**loaded_yaml_cfg, **saved_cfg}
+                except Exception as e:
+                    self.logger.warning(f"Failed to load {args_yaml}: {e}")
+
+            if isinstance(saved_cfg, dict):
+                for k, v in saved_cfg.items():
+                    if hasattr(self.config, k):
+                        curr_v = getattr(self.config, k)
+                        if k == "coco_gt_path" and curr_v is None and v is not None:
+                            setattr(self.config, k, Path(v).resolve() if v else None)
+                        elif k == "model_name" and v:
+                            setattr(self.config, k, str(v))
+                        elif k in ("gt_data_yaml", "pl_images_dir", "pl_labels_dir") and v:
+                            setattr(self.config, k, Path(v).resolve())
+                        elif k in ("unsupervised_weight", "ema_decay", "tail_ratio", "close_mosaic_ratio", "lr0", "lrf"):
+                            setattr(self.config, k, float(v))
+                        elif k in ("ssl_epochs", "warmup_epochs", "batch_size", "imgsz", "workers"):
+                            setattr(self.config, k, int(v))
+
+            if self.config.coco_gt_path is None:
+                self.config.coco_gt_path = discover_coco_gt_path(self.config.gt_data_yaml)
+
+            self.save_args()
+
+            # Locate base model template with matching architecture and nc
+            base_candidates = [
+                ckpt_file.parent / "last.pt",
+                self.weights_dir / "last.pt",
+                ckpt_file.parent / "warmup_best.pt",
+                self.weights_dir / "warmup_best.pt",
+                ckpt_file.parent / "best.pt",
+                self.weights_dir / "best.pt",
+                raw_ckpt.get("warmup_weights"),
+            ]
+            base_model_path = next(
+                (c for c in base_candidates if c and Path(c).is_file()), None
+            )
+
+            if base_model_path is not None:
+                self.logger.info(f"Instantiating model templates from base checkpoint: {base_model_path}")
+                teacher = YOLO(str(base_model_path))
+                student = YOLO(str(base_model_path))
+            else:
+                nc = int(raw_ckpt.get("nc") or self._infer_nc_from_state_dict(raw_ckpt["student_state_dict"]))
+                model_yaml = self._resolve_model_yaml(self.config.model_name)
+                self.logger.info(f"Instantiating DetectionModel({model_yaml}, nc={nc})")
+                teacher = YOLO(model_yaml)
+                teacher.model = DetectionModel(cfg=model_yaml, nc=nc, verbose=False)
+                teacher.model.nc = nc
+                student = YOLO(model_yaml)
+                student.model = DetectionModel(cfg=model_yaml, nc=nc, verbose=False)
+                student.model.nc = nc
+
             cfg_dict = deepcopy(DEFAULT_CFG_DICT)
             if hasattr(student, "overrides") and isinstance(student.overrides, dict):
                 cfg_dict.update(student.overrides)
@@ -976,21 +1195,40 @@ class MeanTeacherTrainer:
 
         # 4. Results tracking and results.csv synchronization
         results_csv = self.exp_dir / "results.csv"
-        csv_header_written = results_csv.exists()
+        csv_header_written = results_csv.exists() and results_csv.stat().st_size > 0
 
         if results_csv.exists() and start_epoch > 0:
             lines = results_csv.read_text(encoding="utf-8").splitlines()
             if lines:
-                header = lines[0]
-                valid_lines = [header]
+                old_header = lines[0].split(",")
+                expected_threshold_cols = [
+                    "threshold/small",
+                    "threshold/medium",
+                    "threshold/large",
+                ]
+                missing_cols = [c for c in expected_threshold_cols if c not in old_header]
+
+                valid_rows = []
                 for line in lines[1:]:
                     parts = line.split(",")
-                    if parts and parts[0].isdigit():
-                        if int(parts[0]) <= start_epoch:
-                            valid_lines.append(line)
-                results_csv.write_text("\n".join(valid_lines) + "\n", encoding="utf-8")
+                    if parts and parts[0].isdigit() and int(parts[0]) <= start_epoch:
+                        row_dict = dict(zip(old_header, parts))
+                        for mc in missing_cols:
+                            row_dict[mc] = "0.0"
+                        valid_rows.append(row_dict)
+
+                new_header = list(old_header)
+                if missing_cols:
+                    insert_idx = 3 if len(new_header) > 3 else len(new_header)
+                    for mc in reversed(missing_cols):
+                        new_header.insert(insert_idx, mc)
+
+                out_lines = [",".join(new_header)]
+                for r in valid_rows:
+                    out_lines.append(",".join(str(r.get(c, "0.0")) for c in new_header))
+                results_csv.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
                 self.logger.info(
-                    f"Synchronized results.csv to last completed epoch {start_epoch}."
+                    f"Synchronized and aligned results.csv to last completed epoch {start_epoch}."
                 )
 
         # 5. Training Loop with graceful KeyboardInterrupt handling
@@ -1142,11 +1380,15 @@ class MeanTeacherTrainer:
                     f"Teacher mAP50={map50:.4f}, mAP50-95={map50_95:.4f}, Fitness={fitness:.4f}"
                 )
 
-                # Record epoch log
+                # Record epoch log with confidence thresholds
+                thresholds = gen_out.get("thresholds", {}) if gen_out else {}
                 record = {
                     "epoch": epoch + 1,
                     "train_loss": mean_train_loss,
                     "epoch_time": epoch_time,
+                    "threshold/small": float(thresholds.get("small", 0.0)),
+                    "threshold/medium": float(thresholds.get("medium", 0.0)),
+                    "threshold/large": float(thresholds.get("large", 0.0)),
                     **val_metrics,
                 }
                 training_history.append(record)
@@ -1159,7 +1401,7 @@ class MeanTeacherTrainer:
                     csv_header_written = True
 
                 with open(results_csv, "a", encoding="utf-8") as f:
-                    f.write(",".join(str(record[k]) for k in fieldnames) + "\n")
+                    f.write(",".join(str(record.get(k, 0.0)) for k in fieldnames) + "\n")
 
                 # Checkpoint management
                 if fitness > best_fitness:
@@ -1208,12 +1450,15 @@ class MeanTeacherTrainer:
                 "best_epoch": best_epoch,
                 "training_history": deepcopy(training_history),
                 "config": asdict(self.config),
+                "nc": getattr(student.model, "nc", 1),
+                "model_name": self.config.model_name,
                 "warmup_weights": str(ckpt_path),
                 "rng_state": clean_rng,
                 "is_interrupted": True,
             }
             torch.save(paused_checkpoint, tmp_paused)
             tmp_paused.replace(paused_path)
+            self.save_args()
 
             try:
                 teacher.save(str(last_path))
@@ -1261,6 +1506,7 @@ class MeanTeacherTrainer:
 
 @app.command()
 def main(
+    ctx: typer.Context,
     gt_yaml: Path = typer.Option(
         Path("data/flow_img.yaml"), "--gt-yaml", help="Path to GT dataset YAML."
     ),
@@ -1321,36 +1567,83 @@ def main(
     ),
 ) -> None:
     """Run Mean Teacher semi-supervised training."""
+    saved_cfg: dict[str, Any] = {}
     if resume is not None:
         inferred_project, inferred_name = infer_exp_dir_from_resume(resume)
         if project is None:
             project = inferred_project
         if name is None:
             name = inferred_name
+        exp_dir = project / name
+        args_yaml_path = exp_dir / "args.yaml"
+        if args_yaml_path.is_file():
+            try:
+                saved_cfg = load_config_yaml(args_yaml_path)
+            except Exception:
+                pass
+        if not saved_cfg:
+            try:
+                _load_heavy_dependencies()
+                resolved_ckpt = MeanTeacherTrainer.resolve_checkpoint_path(resume)
+                ckpt_dict = torch.load(resolved_ckpt, map_location="cpu", weights_only=False)
+                if isinstance(ckpt_dict, dict) and "config" in ckpt_dict and isinstance(ckpt_dict["config"], dict):
+                    saved_cfg = ckpt_dict["config"]
+            except Exception:
+                pass
     else:
         if project is None:
             project = Path("runs/mean_teacher")
         if name is None:
             name = "exp"
 
+    def was_specified(param_name: str) -> bool:
+        src = ctx.get_parameter_source(param_name)
+        return src is not None and getattr(src, "name", "") == "COMMANDLINE"
+
+    def pick_val(param_name: str, cli_val: Any, cfg_key: str, default_val: Any) -> Any:
+        if was_specified(param_name):
+            return cli_val
+        if saved_cfg and cfg_key in saved_cfg and saved_cfg[cfg_key] is not None:
+            return saved_cfg[cfg_key]
+        return cli_val if cli_val is not None else default_val
+
+    chosen_model = pick_val("model", model, "model_name", "yolo26m.pt")
+    chosen_warmup_weights = pick_val("warmup_weights", warmup_weights, "warmup_weights", None)
+    chosen_gt_yaml = pick_val("gt_yaml", gt_yaml, "gt_data_yaml", Path("data/flow_img.yaml"))
+    chosen_pl_images = pick_val("pl_images", pl_images, "pl_images_dir", Path("data/video_frames/images/all"))
+    chosen_pl_labels = pick_val("pl_labels", pl_labels, "pl_labels_dir", Path("data/video_frames/labels/all"))
+    chosen_coco_gt = pick_val("coco_gt", coco_gt, "coco_gt_path", None)
+    chosen_warmup_epochs = int(pick_val("warmup_epochs", warmup_epochs, "warmup_epochs", 10))
+    chosen_ssl_epochs = int(pick_val("ssl_epochs", ssl_epochs, "ssl_epochs", 50))
+    chosen_batch = int(pick_val("batch", batch, "batch_size", 16))
+    chosen_imgsz = int(pick_val("imgsz", imgsz, "imgsz", 640))
+    chosen_workers = int(pick_val("workers", workers, "workers", 4))
+    chosen_device = pick_val("device", device, "device", None)
+    chosen_ema_decay = float(pick_val("ema_decay", ema_decay, "ema_decay", 0.999))
+    chosen_unsupervised_weight = float(pick_val("unsupervised_weight", unsupervised_weight, "unsupervised_weight", 1.0))
+    chosen_max_pseudo_images = pick_val("max_pseudo_images", max_pseudo_images, "max_pseudo_images", None)
+    if chosen_max_pseudo_images is not None:
+        chosen_max_pseudo_images = int(chosen_max_pseudo_images)
+    chosen_save_candidates = bool(pick_val("save_candidates", save_candidates, "save_candidates", False))
+
     cfg = MeanTeacherConfig(
-        model_name=model,
-        warmup_weights=warmup_weights,
+        model_name=str(chosen_model),
+        warmup_weights=Path(chosen_warmup_weights) if chosen_warmup_weights else None,
         resume=resume,
-        gt_data_yaml=gt_yaml,
-        pl_images_dir=pl_images,
-        pl_labels_dir=pl_labels,
-        coco_gt_path=coco_gt,
-        warmup_epochs=warmup_epochs,
-        ssl_epochs=ssl_epochs,
-        batch_size=batch,
-        imgsz=imgsz,
-        workers=workers,
-        device=device,
-        ema_decay=ema_decay,
-        unsupervised_weight=unsupervised_weight,
-        max_pseudo_images=max_pseudo_images,
-        save_candidates=save_candidates,
+        gt_data_yaml=Path(chosen_gt_yaml),
+        pl_images_dir=Path(chosen_pl_images),
+        pl_labels_dir=Path(chosen_pl_labels),
+        coco_gt_path=Path(chosen_coco_gt) if chosen_coco_gt else None,
+        warmup_epochs=chosen_warmup_epochs,
+        ssl_epochs=chosen_ssl_epochs,
+        batch_size=chosen_batch,
+        imgsz=chosen_imgsz,
+        workers=chosen_workers,
+        device=chosen_device,
+        ema_decay=chosen_ema_decay,
+        unsupervised_weight=chosen_unsupervised_weight,
+        max_pseudo_images=chosen_max_pseudo_images,
+        save_candidates=chosen_save_candidates,
         runs_dir=project,
         experiment_name=name,
     )
