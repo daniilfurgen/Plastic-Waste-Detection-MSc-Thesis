@@ -293,12 +293,26 @@ def build_val_transforms(imgsz: int = 640) -> Compose:
     )
 
 
+def split_pl_weight(sample: dict[str, Any]) -> dict[str, Any]:
+    """Split a (N, 2) [class_id, weight] `cls` tensor into `cls` (N, 1) and `pl_weight` (N,)."""
+    cls = sample["cls"]
+    if cls.ndim == 2 and cls.shape[1] == 2:
+        sample["cls"] = cls[:, :1].contiguous()
+        sample["pl_weight"] = cls[:, 1].contiguous().float()
+    else:
+        sample["pl_weight"] = torch.ones(cls.shape[0], dtype=torch.float32)
+    return sample
+
+
 class PseudoYOLODataset(YOLODataset):
     """
     YOLO dataset tailored for dynamic pseudo-labeled pools.
     Supports in-memory Polars DataFrame updates as well as disk .txt re-scans.
     Supports filter_empty=True (only training on images with pseudo-labels).
     Gracefully handles empty pseudo-label sets (len=0).
+    Label `cls` arrays are (N, 2): [class_id, per-box loss weight]. Every transform indexes
+    `cls` row-wise alongside the boxes, so the weight stays aligned through augmentation;
+    __getitem__ splits it back into `cls` (N, 1) and `pl_weight` (N,).
     """
 
     def __init__(
@@ -413,6 +427,18 @@ class PseudoYOLODataset(YOLODataset):
 
         return self.ims[i], self.im_hw0[i], self.im_hw[i]
 
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        sample = super().__getitem__(index)
+        return split_pl_weight(sample)
+
+    @staticmethod
+    def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
+        """YOLODataset collation plus `pl_weight` concatenated in box order."""
+        weights = [b.pop("pl_weight") for b in batch]
+        collated = YOLODataset.collate_fn(batch)
+        collated["pl_weight"] = torch.cat(weights, 0).float()
+        return collated
+
     def get_labels(self) -> list[dict[str, Any]]:
         """Override standard label loading to load from self.labels_dir."""
         return self._load_labels_from_disk(filter_empty=self.filter_empty)
@@ -453,6 +479,7 @@ class PseudoYOLODataset(YOLODataset):
 
             boxes: list[list[float]] = []
             classes: list[int] = []
+            weights: list[float] = []
 
             if label_path.exists() and label_path.is_file():
                 content = label_path.read_text(encoding="utf-8").strip()
@@ -464,6 +491,7 @@ class PseudoYOLODataset(YOLODataset):
                             xc, yc, w, h = (float(v) for v in parts[1:5])
                             classes.append(cls_id)
                             boxes.append([xc, yc, w, h])
+                            weights.append(float(parts[5]) if len(parts) >= 6 else 1.0)
 
             if filter_empty and len(boxes) == 0:
                 continue
@@ -475,9 +503,9 @@ class PseudoYOLODataset(YOLODataset):
             h, w = im.shape[:2]
 
             cls_arr = (
-                np.array(classes, dtype=np.float32).reshape(-1, 1)
+                np.stack([classes, weights], axis=1).astype(np.float32)
                 if classes
-                else np.empty((0, 1), dtype=np.float32)
+                else np.empty((0, 2), dtype=np.float32)
             )
             box_arr = (
                 np.array(boxes, dtype=np.float32).reshape(-1, 4)
@@ -527,7 +555,7 @@ class PseudoYOLODataset(YOLODataset):
                     record = {
                         "im_file": str(img_path),
                         "shape": (h, w),
-                        "cls": np.empty((0, 1), dtype=np.float32),
+                        "cls": np.empty((0, 2), dtype=np.float32),
                         "bboxes": np.empty((0, 4), dtype=np.float32),
                         "segments": [],
                         "keypoints": None,
@@ -557,7 +585,14 @@ class PseudoYOLODataset(YOLODataset):
             img_width = group_df["img_width"][0]
             img_height = group_df["img_height"][0]
 
-            classes = group_df["class_id"].to_numpy().astype(np.float32).reshape(-1, 1)
+            weights = (
+                group_df["weight"].to_numpy()
+                if "weight" in group_df.columns
+                else np.ones(len(group_df))
+            )
+            classes = np.stack(
+                [group_df["class_id"].to_numpy(), weights], axis=1
+            ).astype(np.float32)
             xc = group_df["x_center"].to_numpy().astype(np.float32)
             yc = group_df["y_center"].to_numpy().astype(np.float32)
             wn = group_df["w_norm"].to_numpy().astype(np.float32)
@@ -587,7 +622,7 @@ class PseudoYOLODataset(YOLODataset):
                     record = {
                         "im_file": str(img_path),
                         "shape": (h, w),
-                        "cls": np.empty((0, 1), dtype=np.float32),
+                        "cls": np.empty((0, 2), dtype=np.float32),
                         "bboxes": np.empty((0, 4), dtype=np.float32),
                         "segments": [],
                         "keypoints": None,
@@ -787,6 +822,8 @@ class SSODDataset(Dataset):
             sample = self.pl_dataset[index - n_gt]
             sample["is_pseudo"] = True
             sample["source"] = 1  # 1 for Pseudo
+        if "pl_weight" not in sample:
+            sample["pl_weight"] = torch.ones(sample["cls"].shape[0], dtype=torch.float32)
         return sample
 
     @staticmethod
@@ -797,16 +834,23 @@ class SSODDataset(Dataset):
         """
         is_pseudo_list = [b["is_pseudo"] for b in batch]
         source_list = [b["source"] for b in batch]
+        weight_list = [
+            b.get("pl_weight", torch.ones(b["cls"].shape[0], dtype=torch.float32))
+            for b in batch
+        ]
 
-        # Strip custom non-tensor metadata keys before calling standard YOLODataset.collate_fn
+        # Strip custom metadata keys before calling standard YOLODataset.collate_fn
         standard_batch = []
         for b in batch:
-            clean = {k: v for k, v in b.items() if k not in {"is_pseudo", "source"}}
+            clean = {
+                k: v for k, v in b.items() if k not in {"is_pseudo", "source", "pl_weight"}
+            }
             standard_batch.append(clean)
 
         collated = YOLODataset.collate_fn(standard_batch)
         collated["is_pseudo"] = torch.tensor(is_pseudo_list, dtype=torch.bool)
         collated["source"] = torch.tensor(source_list, dtype=torch.long)
+        collated["pl_weight"] = torch.cat(weight_list, 0).float()  # aligned with bboxes
         return collated
 
 

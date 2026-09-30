@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     from ssod.dataset import SSODAugmentConfig, SSODDatasetHandler
     from ssod.metrics import evaluate_coco
     from ssod.pseudo_labeling import PseudoLabelGenerator
+    from ssod.losses import WeightedDetectionLoss
 
 # Runtime placeholders populated on-demand by _load_heavy_dependencies()
 torch: Any = None
@@ -72,12 +73,15 @@ SSODAugmentConfig: Any = None
 SSODDatasetHandler: Any = None
 evaluate_coco: Any = None
 PseudoLabelGenerator: Any = None
+WeightedDetectionLoss: Any = None
+E2ELoss: Any = None
 
 
 def _load_heavy_dependencies() -> None:
     """Lazily load heavy scientific and CV libraries to ensure instantaneous CLI --help."""
     global torch, nn, np, tqdm, YOLO, DetectionModel, DetectionValidator, DEFAULT_CFG_DICT, IterableSimpleNamespace
     global SSODAugmentConfig, SSODDatasetHandler, evaluate_coco, PseudoLabelGenerator
+    global WeightedDetectionLoss, E2ELoss
 
     if torch is not None:
         return
@@ -89,6 +93,7 @@ def _load_heavy_dependencies() -> None:
     from ultralytics import YOLO as _YOLO
     from ultralytics.models.yolo.detect import DetectionValidator as _DetectionValidator
     from ultralytics.nn.tasks import DetectionModel as _DetectionModel
+    from ultralytics.utils.loss import E2ELoss as _E2ELoss
     from ultralytics.utils import (
         DEFAULT_CFG_DICT as _DEFAULT_CFG_DICT,
         IterableSimpleNamespace as _IterableSimpleNamespace,
@@ -101,6 +106,7 @@ def _load_heavy_dependencies() -> None:
         )
         from ssod.metrics import evaluate_coco as _evaluate_coco
         from ssod.pseudo_labeling import PseudoLabelGenerator as _PseudoLabelGenerator
+        from ssod.losses import WeightedDetectionLoss as _WeightedDetectionLoss
     except ImportError:
         from dataset import (  # type: ignore[import-not-found,no-redef]
             SSODAugmentConfig as _SSODAugmentConfig,
@@ -108,6 +114,7 @@ def _load_heavy_dependencies() -> None:
         )
         from metrics import evaluate_coco as _evaluate_coco  # type: ignore[import-not-found,no-redef]
         from pseudo_labeling import PseudoLabelGenerator as _PseudoLabelGenerator  # type: ignore[import-not-found,no-redef]
+        from losses import WeightedDetectionLoss as _WeightedDetectionLoss  # type: ignore[import-not-found,no-redef]
 
     torch = _torch
     nn = _nn
@@ -122,6 +129,8 @@ def _load_heavy_dependencies() -> None:
     SSODDatasetHandler = _SSODDatasetHandler
     evaluate_coco = _evaluate_coco
     PseudoLabelGenerator = _PseudoLabelGenerator
+    WeightedDetectionLoss = _WeightedDetectionLoss
+    E2ELoss = _E2ELoss
 
 
 def __getattr__(name: str) -> Any:
@@ -260,6 +269,8 @@ class MeanTeacherConfig:
     unsupervised_warmup_epochs: int = 0  # linear lambda_u ramp-up; 0 disables
     gt_repeat: int = 1  # times the GT head is repeated per epoch
     pl_strong_aug: bool = False  # strong Student augmentation on pseudo-labeled images
+    pl_images_per_epoch: int | None = None  # fresh uniform PL image sample per epoch; None = all
+    pl_soft_weights: bool = False  # threshold-aware per-box PL loss weights
 
     # Pseudo-labeling parameters
     pseudo_conf: float = 0.001
@@ -403,6 +414,8 @@ def split_batch(batch: dict[str, Any], mask: torch.Tensor) -> dict[str, Any]:
         b_mask = torch.isin(batch["batch_idx"], indices.float())
         new_batch["bboxes"] = batch["bboxes"][b_mask]
         new_batch["cls"] = batch["cls"][b_mask]
+        if "pl_weight" in batch:
+            new_batch["pl_weight"] = batch["pl_weight"][b_mask]
         idx_map = {idx.item(): i for i, idx in enumerate(indices)}
         remapped = [idx_map[int(x.item())] for x in batch["batch_idx"][b_mask]]
         new_batch["batch_idx"] = torch.tensor(
@@ -412,6 +425,8 @@ def split_batch(batch: dict[str, Any], mask: torch.Tensor) -> dict[str, Any]:
         new_batch["bboxes"] = torch.empty((0, 4), device=batch["img"].device)
         new_batch["cls"] = torch.empty((0, 1), device=batch["img"].device)
         new_batch["batch_idx"] = torch.empty((0,), device=batch["img"].device)
+        if "pl_weight" in batch:
+            new_batch["pl_weight"] = torch.empty((0,), device=batch["img"].device)
 
     return new_batch
 
@@ -423,14 +438,36 @@ def configure_student_criterion(model: nn.Module) -> Any:
     Ultralytics' E2ELoss starts at o2m=0.8 / o2o=0.2 and relies on the trainer calling criterion.update()
     every epoch to decay towards o2m=final_o2m (0.1). The custom SSL loop never calls update(), so a lazily
     created criterion would under-weight the one-to-one head used at inference for the whole SSL phase.
+    Uses WeightedDetectionLoss (per-box `pl_weight` importance weights; identical to the stock
+    loss when the batch carries no weights) for both E2E branches.
     Must be called after the model is on its target device and model.args is set.
     """
-    criterion = model.init_criterion()
+    _load_heavy_dependencies()
+    if getattr(model, "end2end", False):
+        criterion = E2ELoss(model, loss_fn=WeightedDetectionLoss)
+    else:
+        criterion = WeightedDetectionLoss(model)
     if hasattr(criterion, "final_o2m"):
         criterion.o2m = criterion.final_o2m
         criterion.o2o = max(criterion.total - criterion.o2m, 0.0)
     model.criterion = criterion
     return criterion
+
+
+def pl_stat_columns(gen_out: dict[str, Any] | None) -> dict[str, float]:
+    """Per-epoch pseudo-label statistics for results.csv (zeros when no labels were generated)."""
+    gen_out = gen_out or {}
+    filtered = gen_out.get("filtered_df")
+    bin_stats = gen_out.get("bin_stats", {})
+    columns: dict[str, float] = {
+        "pl_images": float(gen_out.get("labeled_images", 0)),
+        "pl_boxes": float(len(filtered)) if filtered is not None else 0.0,
+    }
+    for sb in ("small", "medium", "large"):
+        columns[f"pl_share/{sb}"] = float(bin_stats.get(sb, {}).get("share", 0.0))
+    for sb in ("small", "medium", "large"):
+        columns[f"pl_weight/{sb}"] = float(bin_stats.get(sb, {}).get("mean_weight", 0.0))
+    return columns
 
 
 def compute_batch_loss(
@@ -825,8 +862,10 @@ class MeanTeacherTrainer:
                             setattr(self.config, k, float(v))
                         elif k in ("ssl_epochs", "warmup_epochs", "batch_size", "imgsz", "workers", "unsupervised_warmup_epochs", "gt_repeat"):
                             setattr(self.config, k, int(v))
-                        elif k == "pl_strong_aug":
+                        elif k in ("pl_strong_aug", "pl_soft_weights"):
                             setattr(self.config, k, bool(v))
+                        elif k == "pl_images_per_epoch":
+                            setattr(self.config, k, int(v) if v is not None else None)
 
             if self.config.coco_gt_path is None:
                 self.config.coco_gt_path = discover_coco_gt_path(self.config.gt_data_yaml)
@@ -1136,6 +1175,7 @@ class MeanTeacherTrainer:
             conf=self.config.pseudo_conf,
             iou_threshold=self.config.pseudo_iou,
             fallback_threshold=self.config.pseudo_fallback_threshold,
+            soft_weights=self.config.pl_soft_weights,
             device=self.device,
             logger=self.logger,
         )
@@ -1266,14 +1306,23 @@ class MeanTeacherTrainer:
                 )
 
         def append_result(record: dict[str, Any]) -> None:
+            """Append a row in the existing header's column order, extending the header if needed."""
             nonlocal csv_header_written
-            fieldnames = list(record.keys())
             if not csv_header_written:
                 with open(results_csv, "w", encoding="utf-8") as f:
-                    f.write(",".join(fieldnames) + "\n")
+                    f.write(",".join(record.keys()) + "\n")
                 csv_header_written = True
+            lines = results_csv.read_text(encoding="utf-8").splitlines()
+            header = lines[0].split(",")
+            new_cols = [k for k in record if k not in header]
+            if new_cols:
+                rows = [line + ",0.0" * len(new_cols) for line in lines[1:] if line]
+                header += new_cols
+                results_csv.write_text(
+                    "\n".join([",".join(header), *rows]) + "\n", encoding="utf-8"
+                )
             with open(results_csv, "a", encoding="utf-8") as f:
-                f.write(",".join(str(record.get(k, 0.0)) for k in fieldnames) + "\n")
+                f.write(",".join(str(record.get(k, 0.0)) for k in header) + "\n")
 
         # Baseline: evaluate the starting Teacher with the same evaluator as SSL epochs
         if resume_target is None and start_epoch == 0:
@@ -1300,6 +1349,7 @@ class MeanTeacherTrainer:
                 "threshold/small": 0.0,
                 "threshold/medium": 0.0,
                 "threshold/large": 0.0,
+                **pl_stat_columns(None),
                 **baseline_metrics,
             }
             training_history.append(baseline_record)
@@ -1351,6 +1401,8 @@ class MeanTeacherTrainer:
                     labels_dir=self.config.pl_labels_dir,
                     max_images=self.config.max_pseudo_images,
                     save_candidates_path=candidates_path,
+                    sample_images=self.config.pl_images_per_epoch,
+                    sample_seed=self.config.seed + epoch,
                 )
                 dataset_handler.reload_pseudo_labels(
                     filtered_df=gen_out.get("filtered_df")
@@ -1469,6 +1521,7 @@ class MeanTeacherTrainer:
                     "threshold/small": float(thresholds.get("small", 0.0)),
                     "threshold/medium": float(thresholds.get("medium", 0.0)),
                     "threshold/large": float(thresholds.get("large", 0.0)),
+                    **pl_stat_columns(gen_out),
                     **val_metrics,
                 }
                 training_history.append(record)
@@ -1629,6 +1682,17 @@ def main(
         "--pl-strong-aug/--no-pl-strong-aug",
         help="Strong Student augmentation (HSV, blur, erasing) on pseudo-labeled images.",
     ),
+    pl_images_per_epoch: Optional[int] = typer.Option(
+        None,
+        "--pl-images-per-epoch",
+        help="Pseudo-label a fresh uniform random sample of this many unlabeled images each epoch.",
+        min=1,
+    ),
+    pl_soft_weights: bool = typer.Option(
+        False,
+        "--pl-soft-weights/--no-pl-soft-weights",
+        help="Weight each pseudo box's loss by its score between its size bin's threshold and object mode.",
+    ),
     max_pseudo_images: Optional[int] = typer.Option(
         None, "--max-pseudo-images", help="Max unlabeled images for pseudo-labeling."
     ),
@@ -1718,6 +1782,10 @@ def main(
     chosen_tail_ratio = float(pick_val("tail_ratio", tail_ratio, "tail_ratio", 0.25))
     chosen_gt_repeat = int(pick_val("gt_repeat", gt_repeat, "gt_repeat", 1))
     chosen_pl_strong_aug = bool(pick_val("pl_strong_aug", pl_strong_aug, "pl_strong_aug", False))
+    chosen_pl_images_per_epoch = pick_val("pl_images_per_epoch", pl_images_per_epoch, "pl_images_per_epoch", None)
+    if chosen_pl_images_per_epoch is not None:
+        chosen_pl_images_per_epoch = int(chosen_pl_images_per_epoch)
+    chosen_pl_soft_weights = bool(pick_val("pl_soft_weights", pl_soft_weights, "pl_soft_weights", False))
     chosen_max_pseudo_images = pick_val("max_pseudo_images", max_pseudo_images, "max_pseudo_images", None)
     if chosen_max_pseudo_images is not None:
         chosen_max_pseudo_images = int(chosen_max_pseudo_images)
@@ -1744,6 +1812,8 @@ def main(
         tail_ratio=chosen_tail_ratio,
         gt_repeat=chosen_gt_repeat,
         pl_strong_aug=chosen_pl_strong_aug,
+        pl_images_per_epoch=chosen_pl_images_per_epoch,
+        pl_soft_weights=chosen_pl_soft_weights,
         max_pseudo_images=chosen_max_pseudo_images,
         pseudo_fallback_threshold=chosen_pseudo_fallback_threshold,
         save_candidates=chosen_save_candidates,

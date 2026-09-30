@@ -41,6 +41,7 @@ EMPTY_FILTERED_SCHEMA: dict[str, Any] = {
     "y_center": pl.Float32,
     "w_norm": pl.Float32,
     "h_norm": pl.Float32,
+    "weight": pl.Float32,
     "line": pl.String,
 }
 
@@ -126,20 +127,20 @@ def assign_size_bin(w: float, h: float) -> str:
     return "large"
 
 
-def ground_threshold(
+def ground_modes(
     scores: Sequence[float] | np.ndarray,
     lo: float = 0.0,
     hi: float = 1.0,
     n_bins: int = 21,
     smooth: int = 3,
-) -> float | None:
+) -> tuple[float, float] | None:
     """
     Locate the valley between the low-score (noise) mode and the high-score (object) mode.
 
     The histogram must span the whole candidate score range: the noise mode sits near the
     candidate confidence floor, so clipping the range (e.g. to [0.5, 1.0]) removes the valley.
     The two highest local maxima of a moving-average-smoothed histogram are taken as the modes
-    and the centre of the lowest bin between them is returned.
+    and the centres of the lowest bin between them (valley) and of the upper mode are returned.
     Returns None when there is no valley (fewer than two modes, or a flat valley).
     """
     hist, bin_edges = np.histogram(scores, bins=n_bins, range=(lo, hi))
@@ -164,7 +165,36 @@ def ground_threshold(
     if counts[valley_index] >= min(counts[first], counts[second]):
         return None
 
-    return float((bin_edges[valley_index] + bin_edges[valley_index + 1]) / 2.0)
+    centres = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+    return float(centres[valley_index]), float(centres[second])
+
+
+def ground_threshold(
+    scores: Sequence[float] | np.ndarray,
+    lo: float = 0.0,
+    hi: float = 1.0,
+    n_bins: int = 21,
+    smooth: int = 3,
+) -> float | None:
+    """Valley between the noise and object modes (see `ground_modes`), or None if there is none."""
+    modes = ground_modes(scores, lo=lo, hi=hi, n_bins=n_bins, smooth=smooth)
+    return None if modes is None else modes[0]
+
+
+def box_weights(
+    scores: np.ndarray,
+    threshold: float,
+    object_mode: float,
+) -> np.ndarray:
+    """
+    Threshold-aware pseudo-box weights: 0 at the size bin's threshold, rising linearly to 1
+    at the bin's object mode, 1 above it. Normalising by the valley-to-mode gap keeps the
+    weights independent of where the threshold sits and of how confident the Teacher is.
+    """
+    gap = object_mode - threshold
+    if gap < 1e-3:
+        return np.ones_like(scores, dtype=np.float32)
+    return np.clip((scores - threshold) / gap, 0.0, 1.0).astype(np.float32)
 
 
 def generate_candidates_multiview(
@@ -208,6 +238,23 @@ def generate_candidates_multiview(
 
     merged = _nms_aggregate(list(raw_preds.values()), iou_threshold=iou_threshold)
     return merged
+
+
+def sample_image_files(
+    image_files: list[Path],
+    sample_images: int | None,
+    seed: int,
+) -> list[Path]:
+    """
+    Uniform random sample (without replacement, original order kept) of `sample_images` files.
+    Sampling whole images uniformly keeps the pseudo-box size-bin distribution unbiased.
+    Returns all files when `sample_images` is None or not smaller than the pool.
+    """
+    if sample_images is None or not 0 < sample_images < len(image_files):
+        return image_files
+    rng = np.random.default_rng(seed)
+    chosen = np.sort(rng.choice(len(image_files), size=sample_images, replace=False))
+    return [image_files[i] for i in chosen]
 
 
 def resolve_dataset_paths(
@@ -300,6 +347,7 @@ class PseudoLabelGenerator:
         conf: float = 0.001,
         iou_threshold: float = 0.5,
         fallback_threshold: float = 0.4,
+        soft_weights: bool = False,
         device: str | torch.device | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -314,6 +362,7 @@ class PseudoLabelGenerator:
         self.conf = conf
         self.iou_threshold = iou_threshold
         self.fallback_threshold = fallback_threshold
+        self.soft_weights = soft_weights
         self.device = device
         self.logger = logger or get_logger()
         self._cached_images_dir: Path | None = None
@@ -325,15 +374,19 @@ class PseudoLabelGenerator:
         labels_dir: Path | str | None = None,
         max_images: int | None = None,
         save_candidates_path: Path | str | None = None,
+        sample_images: int | None = None,
+        sample_seed: int = 0,
     ) -> dict[str, Any]:
         """
         Run full pseudo-labeling pipeline:
         1. Clean existing annotations in labels_dir and stale caches.
-        2. Generate candidates for all images using batched multi-view inference.
+        2. Generate candidates for all images (or a uniform random sample of `sample_images`
+           images drawn with `sample_seed`) using batched multi-view inference.
         3. Collect candidates into Polars DataFrame.
         4. Optionally export raw candidates to Parquet.
         5. Compute optimal ground threshold per COCO size bin.
-        6. Filter candidates by threshold and save YOLO .txt labels (omitting empty files).
+        6. Filter candidates by threshold, weight them (if soft_weights) and save YOLO .txt
+           labels (omitting empty files; the weight is written as a 6th column).
         """
         if hasattr(self.model, "predictor"):
             self.model.predictor = None
@@ -354,9 +407,17 @@ class PseudoLabelGenerator:
         if max_images is not None and max_images > 0:
             image_files = image_files[:max_images]
 
-        self.logger.info(
-            f"Found {len(image_files)} images in {resolved_img_dir} to process."
-        )
+        pool_size = len(image_files)
+        image_files = sample_image_files(image_files, sample_images, sample_seed)
+        if len(image_files) < pool_size:
+            self.logger.info(
+                f"Sampled {len(image_files)} of {pool_size} images in {resolved_img_dir} "
+                f"(seed={sample_seed})."
+            )
+        else:
+            self.logger.info(
+                f"Found {len(image_files)} images in {resolved_img_dir} to process."
+            )
 
         # 1. Clean existing annotations from scratch
         clean_dataset_annotations(
@@ -517,37 +578,57 @@ class PseudoLabelGenerator:
 
         # 4. Compute optimal ground threshold per COCO size bin
         thresholds: dict[str, float] = {}
-        filter_expr = pl.lit(False)
+        object_modes: dict[str, float] = {}
+        filtered_parts: list[pl.DataFrame] = []
 
         for sb in SIZE_BINS:
-            sb_scores = (
-                candidates_df.filter(pl.col("size_bin") == sb)["score"]
-                .to_numpy()
-                .astype(float)
-            )
-            opt_thresh = ground_threshold(sb_scores, lo=self.conf)
-            if opt_thresh is None:
+            sb_df = candidates_df.filter(pl.col("size_bin") == sb)
+            sb_scores = sb_df["score"].to_numpy().astype(float)
+            modes = ground_modes(sb_scores, lo=self.conf)
+            if modes is None:
+                opt_thresh = self.fallback_threshold
+                above = sb_scores[sb_scores >= opt_thresh]
+                object_mode = float(np.percentile(above, 90)) if len(above) else 1.0
                 self.logger.warning(
                     f"Size bin '{sb}': no score valley found (count={len(sb_scores)}); "
-                    f"using fallback threshold={self.fallback_threshold:.4f}"
+                    f"using fallback threshold={opt_thresh:.4f}"
                 )
-                opt_thresh = self.fallback_threshold
             else:
+                opt_thresh, object_mode = modes
                 self.logger.info(
-                    f"Size bin '{sb}': count={len(sb_scores)}, ground threshold={opt_thresh:.4f}"
+                    f"Size bin '{sb}': count={len(sb_scores)}, ground threshold={opt_thresh:.4f}, "
+                    f"object mode={object_mode:.4f}"
                 )
             thresholds[sb] = opt_thresh
-            filter_expr = filter_expr | (
-                (pl.col("size_bin") == sb) & (pl.col("score") >= opt_thresh)
-            )
+            object_modes[sb] = object_mode
+
+            kept = sb_df.filter(pl.col("score") >= opt_thresh)
+            if self.soft_weights:
+                weights = box_weights(kept["score"].to_numpy(), opt_thresh, object_mode)
+            else:
+                weights = np.ones(len(kept), dtype=np.float32)
+            filtered_parts.append(kept.with_columns(weight=pl.Series(weights, dtype=pl.Float32)))
 
         # 5. Filter candidates
-        filtered_df = candidates_df.filter(filter_expr)
+        filtered_df = pl.concat(filtered_parts)
         labeled_images = filtered_df["image_stem"].n_unique()
         self.logger.info(
             f"Filtered candidates from {total_candidates} to {len(filtered_df)} "
             f"using ground thresholds ({labeled_images} labeled images, "
             f"{len(filtered_df) / max(1, labeled_images):.2f} boxes/image)."
+        )
+        bin_stats: dict[str, dict[str, float]] = {}
+        for sb in SIZE_BINS:
+            sb_weights = filtered_df.filter(pl.col("size_bin") == sb)["weight"]
+            bin_stats[sb] = {
+                "share": len(sb_weights) / max(1, len(filtered_df)),
+                "mean_weight": float(sb_weights.mean()) if len(sb_weights) else 0.0,
+            }
+        self.logger.info(
+            "Pseudo-label size-bin shares / mean weights: "
+            + ", ".join(
+                f"{sb}={st['share']:.3f}/{st['mean_weight']:.3f}" for sb, st in bin_stats.items()
+            )
         )
 
         # 6. Save YOLO format annotations (omit empty txt files)
@@ -580,6 +661,11 @@ class PseudoLabelGenerator:
                         pl.col("w_norm").round(6).cast(pl.String),
                         pl.lit(" "),
                         pl.col("h_norm").round(6).cast(pl.String),
+                        *(
+                            [pl.lit(" "), pl.col("weight").round(4).cast(pl.String)]
+                            if self.soft_weights
+                            else []
+                        ),
                     ]
                 )
             )
@@ -604,6 +690,9 @@ class PseudoLabelGenerator:
             "images_processed": len(image_files),
             "total_candidates": total_candidates,
             "thresholds": thresholds,
+            "object_modes": object_modes,
+            "bin_stats": bin_stats,
+            "labeled_images": labeled_images,
             "labels_written": labels_written,
             "candidates_df": candidates_df,
             "filtered_df": filtered_df,
@@ -622,6 +711,7 @@ def generate_pseudo_labels(
     conf: float = 0.001,
     iou: float = 0.5,
     fallback_threshold: float = 0.4,
+    soft_weights: bool = False,
     device: str | torch.device | None = None,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
@@ -634,6 +724,7 @@ def generate_pseudo_labels(
         conf=conf,
         iou_threshold=iou,
         fallback_threshold=fallback_threshold,
+        soft_weights=soft_weights,
         device=device,
         logger=logger,
     )
@@ -727,6 +818,11 @@ def main(
         min=0.0,
         max=1.0,
     ),
+    soft_weights: bool = typer.Option(
+        False,
+        "--soft-weights/--no-soft-weights",
+        help="Write threshold-aware per-box weights as a 6th label column.",
+    ),
     device: Optional[str] = typer.Option(
         None,
         "--device",
@@ -747,6 +843,7 @@ def main(
         conf=conf,
         iou=iou,
         fallback_threshold=fallback_threshold,
+        soft_weights=soft_weights,
         device=device,
     )
 

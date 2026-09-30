@@ -45,6 +45,7 @@ from ssod.dataset import (  # noqa: E402
     build_gt_transforms,
     build_pseudo_transforms,
     build_val_transforms,
+    split_pl_weight,
 )
 
 
@@ -551,3 +552,102 @@ class TestSSODDatasetIntegration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPseudoBoxWeights(unittest.TestCase):
+    """Per-box pseudo-label weights must stay aligned with their boxes through augmentation and collation."""
+
+    # Distinct widths (all near the centre, so augmentation never clips them) mapped to distinct weights
+    BOXES = [(0.44, 0.10), (0.56, 0.14), (0.50, 0.18)]  # (x_center, width)
+    WEIGHTS = [0.2, 0.5, 0.9]
+
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp())
+        self.pl_img_dir = self.temp_dir / "pseudo" / "images"
+        self.pl_lbl_dir = self.temp_dir / "pseudo" / "labels"
+        for i in range(4):
+            _create_synthetic_image(self.pl_img_dir / f"pseudo_{i}.jpg", width=256, height=256)
+            _create_synthetic_label(
+                self.pl_lbl_dir / f"pseudo_{i}.txt",
+                [f"0 {x} 0.5 {w} {w} {wt}" for (x, w), wt in zip(self.BOXES, self.WEIGHTS)],
+            )
+        _create_synthetic_image(self.pl_img_dir / "pseudo_empty.jpg", width=256, height=256)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _assert_aligned(self, batch: dict[str, Any]) -> None:
+        n = batch["bboxes"].shape[0]
+        self.assertEqual(batch["cls"].shape, (n, 1))
+        self.assertEqual(batch["pl_weight"].shape, (n,))
+        self.assertTrue(torch.all(batch["cls"] == 0))
+        for image_index in batch["batch_idx"].unique():
+            mask = batch["batch_idx"] == image_index
+            widths = batch["bboxes"][mask][:, 2]
+            weights = batch["pl_weight"][mask]
+            order = torch.argsort(widths)
+            # Width ordering is preserved by scale/translate/flip, so weights must follow it
+            self.assertTrue(torch.all(torch.diff(weights[order]) > 0), (widths, weights))
+            for w in weights.tolist():
+                self.assertTrue(any(abs(w - ref) < 1e-4 for ref in self.WEIGHTS))
+
+    def _dataset(self, cfg: SSODAugmentConfig, filter_empty: bool = True) -> PseudoYOLODataset:
+        ds = PseudoYOLODataset(
+            images_dir=self.pl_img_dir,
+            labels_dir=self.pl_lbl_dir,
+            imgsz=128,
+            hyp=cfg,
+            filter_empty=filter_empty,
+        )
+        ds.transforms = build_pseudo_transforms(ds, imgsz=128, hyp=cfg)
+        return ds
+
+    def test_weights_follow_boxes_weak_and_strong(self):
+        for cfg in (SSODAugmentConfig(), SSODAugmentConfig(pl_strong=True, erase_p=1.0)):
+            ds = self._dataset(cfg)
+            np.random.seed(0)
+            seen_boxes = 0
+            for _ in range(5):
+                loader = DataLoader(ds, batch_size=4, collate_fn=PseudoYOLODataset.collate_fn)
+                for batch in loader:
+                    self._assert_aligned(batch)
+                    seen_boxes += batch["bboxes"].shape[0]
+            self.assertGreater(seen_boxes, 20, "augmentation must leave boxes to check")
+
+    def test_empty_samples_collate(self):
+        ds = self._dataset(SSODAugmentConfig(), filter_empty=False)
+        self.assertEqual(len(ds), 5)
+        batch = next(iter(DataLoader(ds, batch_size=5, collate_fn=PseudoYOLODataset.collate_fn)))
+        self._assert_aligned(batch)
+        empty = split_pl_weight({"cls": torch.zeros(0, 1)})
+        self.assertEqual(empty["pl_weight"].shape, (0,))
+
+    def test_dataframe_weights_through_ssod_collate(self):
+        ds = self._dataset(SSODAugmentConfig())
+        rows = [
+            {
+                "image_stem": f"pseudo_{i}",
+                "class_id": 0,
+                "x_center": x,
+                "y_center": 0.5,
+                "w_norm": w,
+                "h_norm": w,
+                "img_width": 256,
+                "img_height": 256,
+                "weight": wt,
+            }
+            for i in range(4)
+            for (x, w), wt in zip(self.BOXES, self.WEIGHTS)
+        ]
+        ds.load_from_dataframe(pl.DataFrame(rows))
+        samples = []
+        for i in range(len(ds)):
+            sample = ds[i]
+            sample["is_pseudo"] = True
+            sample["source"] = 1
+            samples.append(sample)
+        batch = SSODDataset.collate_fn(samples)
+        self._assert_aligned(batch)
+        self.assertGreater(batch["bboxes"].shape[0], 0)
+        self.assertTrue(torch.all(batch["is_pseudo"]))
+

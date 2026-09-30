@@ -126,6 +126,32 @@ class TestMeanTeacherLoss(unittest.TestCase):
         self.assertTrue(loss_w.requires_grad)
         loss_w.backward()
 
+    def test_split_batch_slices_pl_weight(self):
+        batch = {
+            "img": torch.zeros(3, 3, 64, 64),
+            "bboxes": torch.rand(4, 4),
+            "cls": torch.zeros(4, 1),
+            "batch_idx": torch.tensor([0.0, 1.0, 1.0, 2.0]),
+            "pl_weight": torch.tensor([0.1, 0.2, 0.3, 0.4]),
+        }
+        sliced = split_batch(batch, torch.tensor([False, True, True]))
+        torch.testing.assert_close(sliced["pl_weight"], torch.tensor([0.2, 0.3, 0.4]))
+        self.assertEqual(sliced["batch_idx"].tolist(), [0.0, 0.0, 1.0])
+
+    def test_weighted_loss_with_unsupervised_split(self):
+        configure_student_criterion(self.model.model)
+        batch = {
+            "img": torch.zeros(2, 3, 640, 640),
+            "bboxes": torch.tensor([[0.5, 0.5, 0.2, 0.2], [0.3, 0.3, 0.1, 0.1]]),
+            "cls": torch.zeros(2, 1),
+            "batch_idx": torch.tensor([0.0, 1.0]),
+            "is_pseudo": torch.tensor([False, True]),
+            "pl_weight": torch.tensor([1.0, 0.4]),
+        }
+        loss, _ = compute_batch_loss(self.model.model, batch, unsupervised_weight=0.5)
+        self.assertTrue(torch.isfinite(loss))
+        loss.backward()
+
     def test_configure_student_criterion_pins_e2e_gains(self):
         criterion = configure_student_criterion(self.model.model)
         self.assertIs(self.model.model.criterion, criterion)
