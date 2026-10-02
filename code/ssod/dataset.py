@@ -1094,7 +1094,12 @@ class SSODDatasetHandler:
         Update epoch index, evaluate mosaic close condition for last 10% of epochs,
         and re-seed sampler sequence.
         """
-        close_epochs = max(1, math.ceil(self.close_mosaic_ratio * total_epochs))
+        # A ratio of 0 keeps Mosaic open for the whole run
+        close_epochs = (
+            max(1, math.ceil(self.close_mosaic_ratio * total_epochs))
+            if self.close_mosaic_ratio > 0
+            else 0
+        )
         is_last_10_percent = epoch >= (total_epochs - close_epochs)
 
         if is_last_10_percent:

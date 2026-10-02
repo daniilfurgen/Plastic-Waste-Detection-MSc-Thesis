@@ -152,6 +152,43 @@ class TestMeanTeacherLoss(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss))
         loss.backward()
 
+    def _mixed_batch(self) -> dict:
+        return {
+            "img": torch.zeros(3, 3, 640, 640),
+            "bboxes": torch.tensor(
+                [[0.5, 0.5, 0.2, 0.2], [0.3, 0.3, 0.1, 0.1], [0.6, 0.4, 0.2, 0.3], [0.4, 0.6, 0.2, 0.2]]
+            ),
+            "cls": torch.zeros(4, 1),
+            "batch_idx": torch.tensor([0.0, 1.0, 1.0, 2.0]),
+            "is_pseudo": torch.tensor([False, True, True]),
+            "pl_weight": torch.tensor([1.0, 0.5, 0.8, 1.0]),
+        }
+
+    def test_pl_cls_only_masks_pseudo_box_weights(self):
+        configure_student_criterion(self.model.model)
+        batch = self._mixed_batch()
+        loss, _ = compute_batch_loss(self.model.model, batch, pl_cls_only=True)
+        torch.testing.assert_close(batch["box_weight"], torch.tensor([1.0, 0.0, 0.0, 0.0]))
+        self.assertTrue(torch.isfinite(loss))
+        loss.backward()
+
+    def test_pl_cls_only_with_unsupervised_split(self):
+        configure_student_criterion(self.model.model)
+        batch = self._mixed_batch()
+        loss, _ = compute_batch_loss(
+            self.model.model, batch, unsupervised_weight=0.5, pl_cls_only=True
+        )
+        self.assertTrue(torch.isfinite(loss))
+        pseudo_half = split_batch(batch, batch["is_pseudo"])
+        torch.testing.assert_close(pseudo_half["box_weight"], torch.zeros(3))
+        torch.testing.assert_close(pseudo_half["pl_weight"], torch.tensor([0.5, 0.8, 1.0]))
+
+    def test_pl_cls_only_off_adds_no_box_weight(self):
+        configure_student_criterion(self.model.model)
+        batch = self._mixed_batch()
+        compute_batch_loss(self.model.model, batch)
+        self.assertNotIn("box_weight", batch)
+
     def test_configure_student_criterion_pins_e2e_gains(self):
         criterion = configure_student_criterion(self.model.model)
         self.assertIs(self.model.model.criterion, criterion)

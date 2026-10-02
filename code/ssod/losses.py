@@ -5,6 +5,8 @@ Per-box weighted YOLO detection loss for pseudo-labeled training.
 (classification BCE on its assigned anchors, IoU and DFL box terms) by `batch["pl_weight"]`.
 Background anchors and the loss normalisation (`target_scores_sum`) are left untouched, so a
 weight-0 box acts as an ignore region: its anchors are neither pushed to background nor to the box.
+An optional `batch["box_weight"]` overrides the weight of the box terms only (e.g. 0 for pseudo boxes
+to train them for classification only); the classification term always uses `pl_weight`.
 Without `pl_weight` in the batch it is numerically identical to `v8DetectionLoss`.
 """
 
@@ -65,20 +67,25 @@ class WeightedDetectionLoss(v8DetectionLoss):
 
         target_scores_sum = max(target_scores.sum(), 1)
 
-        # Per-anchor importance weight: the assigned box's weight on foreground anchors, 1 elsewhere
-        anchor_weight = None
-        box_weights = batch.get("pl_weight")
-        if box_weights is not None and box_weights.numel() > 0:
+        def anchor_weights(key: str) -> torch.Tensor | None:
+            """Per-anchor weight: the assigned box's `batch[key]` on foreground anchors, 1 elsewhere."""
+            per_box = batch.get(key)
+            if per_box is None or per_box.numel() == 0:
+                return None
             padded = self.preprocess(
-                torch.cat(
-                    (batch_idx, box_weights.view(-1, 1), batch["bboxes"]), 1
-                ).to(self.device),
+                torch.cat((batch_idx, per_box.view(-1, 1), batch["bboxes"]), 1).to(self.device),
                 batch_size,
                 scale_tensor=imgsz[[1, 0, 1, 0]],
             )[..., 0]  # (b, max_boxes), padded exactly like the targets
-            if padded.shape[1] > 0:
-                assigned = padded.gather(1, target_gt_idx)
-                anchor_weight = torch.where(fg_mask, assigned, torch.ones_like(assigned))
+            if padded.shape[1] == 0:
+                return None
+            assigned = padded.gather(1, target_gt_idx)
+            return torch.where(fg_mask, assigned, torch.ones_like(assigned))
+
+        anchor_weight = anchor_weights("pl_weight")
+        box_anchor_weight = (
+            anchor_weights("box_weight") if "box_weight" in batch else anchor_weight
+        )
 
         # Cls loss with optional class weighting
         bce_loss = self.bce(pred_scores, target_scores.to(dtype))  # (bs, num_anchors, nc)
@@ -92,8 +99,8 @@ class WeightedDetectionLoss(v8DetectionLoss):
         if fg_mask.sum():
             box_target_scores = (
                 target_scores
-                if anchor_weight is None
-                else target_scores * anchor_weight.unsqueeze(-1).to(target_scores.dtype)
+                if box_anchor_weight is None
+                else target_scores * box_anchor_weight.unsqueeze(-1).to(target_scores.dtype)
             )
             loss[0], loss[2] = self.bbox_loss(
                 pred_distri,

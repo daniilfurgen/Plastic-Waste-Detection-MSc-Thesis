@@ -69,6 +69,23 @@ class TestWeightedDetectionLoss(unittest.TestCase):
         self.assertGreater(ignored[1].item(), 0.0)
         self.assertLess(ignored[1].item(), full[1].item())
 
+    def test_zero_box_weight_keeps_cls_and_drops_box_terms(self):
+        criterion = WeightedDetectionLoss(self.model, tal_topk=10)
+        weights = torch.tensor([1.0, 0.6, 0.8])
+        weighted = self._loss(criterion, pl_weight=weights)[1]
+        cls_only = self._loss(criterion, pl_weight=weights, box_weight=torch.zeros(3))[1]
+        torch.testing.assert_close(cls_only[1], weighted[1])
+        self.assertEqual(cls_only[0].item(), 0.0)
+        self.assertEqual(cls_only[2].item(), 0.0)
+
+    def test_box_weight_equal_to_pl_weight_is_a_no_op(self):
+        criterion = WeightedDetectionLoss(self.model, tal_topk=10)
+        weights = torch.tensor([1.0, 0.6, 0.8])
+        torch.testing.assert_close(
+            self._loss(criterion, pl_weight=weights, box_weight=weights.clone())[1],
+            self._loss(criterion, pl_weight=weights)[1],
+        )
+
     def test_single_box_weight_is_monotonic(self):
         criterion = WeightedDetectionLoss(self.model, tal_topk=10)
         totals = [

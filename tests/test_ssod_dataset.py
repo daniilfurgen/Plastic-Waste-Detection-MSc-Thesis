@@ -420,6 +420,12 @@ class TestSSODDatasetIntegration(unittest.TestCase):
         handler.set_epoch(epoch=9, total_epochs=total_epochs)
         self.assertTrue(handler.train_dataset.is_mosaic_closed)
 
+        # A ratio of 0 never closes Mosaic, not even in the final epoch
+        handler.close_mosaic_ratio = 0.0
+        handler.set_epoch(epoch=0, total_epochs=total_epochs)
+        handler.set_epoch(epoch=total_epochs - 1, total_epochs=total_epochs)
+        self.assertFalse(handler.train_dataset.is_mosaic_closed)
+
         # Iterate 1 batch to verify tensor execution
         for b in train_loader:
             self.assertEqual(b["img"].shape, (2, 3, 128, 128))

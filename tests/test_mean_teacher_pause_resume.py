@@ -48,6 +48,117 @@ class TestMeanTeacherCLIAndLatency(unittest.TestCase):
         self.assertIn("-r", result.stdout)
 
 
+class TestMeanTeacherCLIOptions(unittest.TestCase):
+    """Test that ablation-relevant CLI options reach MeanTeacherConfig."""
+
+    def test_lr_and_pl_cls_only_options(self):
+        from typer.testing import CliRunner
+
+        from ssod.mean_teacher import app
+
+        captured = {}
+
+        class FakeTrainer:
+            def __init__(self, config):
+                captured["config"] = config
+
+            def train_mean_teacher(self, resume_checkpoint=None):
+                return {}
+
+        test_dir = Path(tempfile.mkdtemp())
+        try:
+            with patch("ssod.mean_teacher.MeanTeacherTrainer", FakeTrainer):
+                result = CliRunner().invoke(
+                    app,
+                    [
+                        "--lr0", "5e-5",
+                        "--lrf", "0.05",
+                        "--pl-cls-only",
+                        "--close-mosaic-ratio", "0",
+                        "--project", str(test_dir),
+                        "--name", "cli",
+                    ],
+                )
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            cfg = captured["config"]
+            self.assertAlmostEqual(cfg.lr0, 5e-5)
+            self.assertAlmostEqual(cfg.lrf, 0.05)
+            self.assertTrue(cfg.pl_cls_only)
+            self.assertEqual(cfg.close_mosaic_ratio, 0.0)
+            self.assertTrue(cfg.pl_soft_weights)  # adopted default
+        finally:
+            shutil.rmtree(test_dir, ignore_errors=True)
+
+
+class TestMeanTeacherDefaults(unittest.TestCase):
+    """Test the adopted default configuration and full-pool handling."""
+
+    def setUp(self):
+        self.test_dir = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def _invoke(self, args: list[str]) -> MeanTeacherConfig:
+        from typer.testing import CliRunner
+
+        from ssod.mean_teacher import app
+
+        captured = {}
+
+        class FakeTrainer:
+            def __init__(self, config):
+                captured["config"] = config
+
+            def train_mean_teacher(self, resume_checkpoint=None):
+                return {}
+
+        with patch("ssod.mean_teacher.MeanTeacherTrainer", FakeTrainer):
+            result = CliRunner().invoke(app, args)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        return captured["config"]
+
+    def test_adopted_defaults(self):
+        cfg = MeanTeacherConfig(runs_dir=self.test_dir)
+        self.assertEqual(cfg.pl_images_per_epoch, 2400)
+        self.assertAlmostEqual(cfg.ema_decay, 0.9996)
+        self.assertTrue(cfg.pl_soft_weights)
+        cli_cfg = self._invoke(["--project", str(self.test_dir), "--name", "defaults"])
+        self.assertEqual(cli_cfg.pl_images_per_epoch, 2400)
+        self.assertAlmostEqual(cli_cfg.ema_decay, 0.9996)
+        self.assertTrue(cli_cfg.pl_soft_weights)
+
+    def test_negative_cap_means_whole_pool(self):
+        self.assertIsNone(MeanTeacherConfig(runs_dir=self.test_dir, pl_images_per_epoch=-1).pl_images_per_epoch)
+        cfg = self._invoke(
+            ["--pl-images-per-epoch", "-1", "--project", str(self.test_dir), "--name", "pool"]
+        )
+        self.assertIsNone(cfg.pl_images_per_epoch)
+
+    def test_historic_pool_control_flags_reproduce_original_settings(self):
+        sys.path.insert(0, str(CODE_DIR / "ssod"))
+        from ssod.ablation import BATCHES
+
+        cfg = self._invoke(
+            [*BATCHES["pool"].runs["control"], "--project", str(self.test_dir), "--name", "control"]
+        )
+        self.assertIsNone(cfg.pl_images_per_epoch)
+        self.assertFalse(cfg.pl_soft_weights)
+        self.assertAlmostEqual(cfg.ema_decay, 0.999)
+
+    def test_resume_keeps_saved_whole_pool(self):
+        exp_dir = self.test_dir / "old_run"
+        (exp_dir / "weights").mkdir(parents=True)
+        (exp_dir / "weights" / "paused.pt").write_bytes(b"")
+        (exp_dir / "args.yaml").write_text(
+            "pl_images_per_epoch: null\npl_soft_weights: false\nema_decay: 0.999\n", encoding="utf-8"
+        )
+        cfg = self._invoke(["--resume", str(exp_dir)])
+        self.assertIsNone(cfg.pl_images_per_epoch)
+        self.assertFalse(cfg.pl_soft_weights)
+        self.assertAlmostEqual(cfg.ema_decay, 0.999)
+
+
 class TestMeanTeacherCheckpointSerialization(unittest.TestCase):
     """Test rich and legacy checkpoint serialization and restoration."""
 

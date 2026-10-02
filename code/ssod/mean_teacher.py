@@ -262,15 +262,17 @@ class MeanTeacherConfig:
     amp: bool = True
 
     # EMA & SSL policies
-    ema_decay: float = 0.999
+    ema_decay: float = 0.9996
     tail_ratio: float = 0.25
     close_mosaic_ratio: float = 0.10
     unsupervised_weight: float = 1.0
     unsupervised_warmup_epochs: int = 0  # linear lambda_u ramp-up; 0 disables
     gt_repeat: int = 1  # times the GT head is repeated per epoch
     pl_strong_aug: bool = False  # strong Student augmentation on pseudo-labeled images
-    pl_images_per_epoch: int | None = None  # fresh uniform PL image sample per epoch; None = all
-    pl_soft_weights: bool = False  # threshold-aware per-box PL loss weights
+    # Fresh uniform PL image sample per epoch; None (or negative) = whole pool, 0 = none (GT-only control)
+    pl_images_per_epoch: int | None = 2400
+    pl_soft_weights: bool = True  # threshold-aware per-box PL loss weights
+    pl_cls_only: bool = False  # pseudo boxes train classification only (no box/DFL regression)
 
     # Pseudo-labeling parameters
     pseudo_conf: float = 0.001
@@ -296,6 +298,8 @@ class MeanTeacherConfig:
             self.coco_gt_path = Path(self.coco_gt_path).resolve()
         if self.warmup_weights is not None:
             self.warmup_weights = Path(self.warmup_weights).resolve()
+        if self.pl_images_per_epoch is not None and self.pl_images_per_epoch < 0:
+            self.pl_images_per_epoch = None
         if self.resume is not None:
             self.resume = Path(self.resume).resolve()
             # If experiment_name was left at default "exp", infer from resume path
@@ -414,8 +418,9 @@ def split_batch(batch: dict[str, Any], mask: torch.Tensor) -> dict[str, Any]:
         b_mask = torch.isin(batch["batch_idx"], indices.float())
         new_batch["bboxes"] = batch["bboxes"][b_mask]
         new_batch["cls"] = batch["cls"][b_mask]
-        if "pl_weight" in batch:
-            new_batch["pl_weight"] = batch["pl_weight"][b_mask]
+        for key in ("pl_weight", "box_weight"):
+            if key in batch:
+                new_batch[key] = batch[key][b_mask]
         idx_map = {idx.item(): i for i, idx in enumerate(indices)}
         remapped = [idx_map[int(x.item())] for x in batch["batch_idx"][b_mask]]
         new_batch["batch_idx"] = torch.tensor(
@@ -425,8 +430,9 @@ def split_batch(batch: dict[str, Any], mask: torch.Tensor) -> dict[str, Any]:
         new_batch["bboxes"] = torch.empty((0, 4), device=batch["img"].device)
         new_batch["cls"] = torch.empty((0, 1), device=batch["img"].device)
         new_batch["batch_idx"] = torch.empty((0,), device=batch["img"].device)
-        if "pl_weight" in batch:
-            new_batch["pl_weight"] = torch.empty((0,), device=batch["img"].device)
+        for key in ("pl_weight", "box_weight"):
+            if key in batch:
+                new_batch[key] = torch.empty((0,), device=batch["img"].device)
 
     return new_batch
 
@@ -474,16 +480,27 @@ def compute_batch_loss(
     model: nn.Module,
     batch: dict[str, Any],
     unsupervised_weight: float = 1.0,
+    pl_cls_only: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute YOLO default detection loss on batch.
     If unsupervised_weight != 1.0 and both GT and Pseudo items are present,
     applies unsupervised_weight to pseudo-labeled loss.
+    If pl_cls_only, pseudo boxes contribute to the classification term only: their
+    box/DFL weight (`batch["box_weight"]`) is 0, while GT boxes keep theirs.
     Returns (loss_tensor, loss_items_detach).
     """
     _load_heavy_dependencies()
     bs = batch["img"].shape[0]
     is_pseudo = batch.get("is_pseudo")
+
+    if pl_cls_only and torch.is_tensor(is_pseudo) and "bboxes" in batch:
+        n_boxes = batch["bboxes"].shape[0]
+        pl_weight = batch.get("pl_weight")
+        if pl_weight is None:
+            pl_weight = torch.ones(n_boxes, device=batch["bboxes"].device)
+        box_is_gt = ~is_pseudo.to(batch["batch_idx"].device)[batch["batch_idx"].long()]
+        batch["box_weight"] = pl_weight * box_is_gt.to(pl_weight.dtype)
 
     if (
         unsupervised_weight == 1.0
@@ -862,7 +879,7 @@ class MeanTeacherTrainer:
                             setattr(self.config, k, float(v))
                         elif k in ("ssl_epochs", "warmup_epochs", "batch_size", "imgsz", "workers", "unsupervised_warmup_epochs", "gt_repeat"):
                             setattr(self.config, k, int(v))
-                        elif k in ("pl_strong_aug", "pl_soft_weights"):
+                        elif k in ("pl_strong_aug", "pl_soft_weights", "pl_cls_only"):
                             setattr(self.config, k, bool(v))
                         elif k == "pl_images_per_epoch":
                             setattr(self.config, k, int(v) if v is not None else None)
@@ -1381,32 +1398,40 @@ class MeanTeacherTrainer:
                 self.logger.info(f"--- Epoch {epoch + 1}/{total_epochs} ---")
 
                 # A. Snapshot teacher weights and isolate for pseudo-label generation
-                teacher.save(str(last_path))
-                inference_teacher = YOLO(str(last_path))
-                pseudo_generator.model = inference_teacher
-                if hasattr(pseudo_generator.model, "predictor"):
-                    pseudo_generator.model.predictor = None
+                if self.config.pl_images_per_epoch == 0:
+                    # Supervised fine-tuning control: same loop, Teacher EMA and schedule, no pseudo-labels
+                    import polars as pl
 
-                candidates_path = None
-                if self.config.save_candidates:
-                    cand_dir = self.exp_dir / self.config.candidates_dir_name
-                    cand_dir.mkdir(parents=True, exist_ok=True)
-                    candidates_path = cand_dir / f"candidates_epoch_{epoch + 1}.parquet"
+                    self.logger.info("Pseudo-labeling disabled (pl_images_per_epoch=0): GT-only epoch.")
+                    gen_out: dict[str, Any] = {}
+                    dataset_handler.reload_pseudo_labels(filtered_df=pl.DataFrame())
+                else:
+                    teacher.save(str(last_path))
+                    inference_teacher = YOLO(str(last_path))
+                    pseudo_generator.model = inference_teacher
+                    if hasattr(pseudo_generator.model, "predictor"):
+                        pseudo_generator.model.predictor = None
 
-                self.logger.info(
-                    f"Generating pseudo-labels with Teacher (conf={self.config.pseudo_conf})..."
-                )
-                gen_out = pseudo_generator.generate(
-                    images_dir=self.config.pl_images_dir,
-                    labels_dir=self.config.pl_labels_dir,
-                    max_images=self.config.max_pseudo_images,
-                    save_candidates_path=candidates_path,
-                    sample_images=self.config.pl_images_per_epoch,
-                    sample_seed=self.config.seed + epoch,
-                )
-                dataset_handler.reload_pseudo_labels(
-                    filtered_df=gen_out.get("filtered_df")
-                )
+                    candidates_path = None
+                    if self.config.save_candidates:
+                        cand_dir = self.exp_dir / self.config.candidates_dir_name
+                        cand_dir.mkdir(parents=True, exist_ok=True)
+                        candidates_path = cand_dir / f"candidates_epoch_{epoch + 1}.parquet"
+
+                    self.logger.info(
+                        f"Generating pseudo-labels with Teacher (conf={self.config.pseudo_conf})..."
+                    )
+                    gen_out = pseudo_generator.generate(
+                        images_dir=self.config.pl_images_dir,
+                        labels_dir=self.config.pl_labels_dir,
+                        max_images=self.config.max_pseudo_images,
+                        save_candidates_path=candidates_path,
+                        sample_images=self.config.pl_images_per_epoch,
+                        sample_seed=self.config.seed + epoch,
+                    )
+                    dataset_handler.reload_pseudo_labels(
+                        filtered_df=gen_out.get("filtered_df")
+                    )
 
                 # B. Configure epoch (25% GT tail sampling, 10% mosaic closing)
                 train_loader = dataset_handler.get_train_loader(persistent_workers=True)
@@ -1453,6 +1478,7 @@ class MeanTeacherTrainer:
                                 model=student.model,
                                 batch=batch,
                                 unsupervised_weight=unsupervised_weight,
+                                pl_cls_only=self.config.pl_cls_only,
                             )
 
                         if use_scaler:
@@ -1661,7 +1687,11 @@ def main(
     workers: int = typer.Option(4, "--workers", help="DataLoader worker processes."),
     device: Optional[str] = typer.Option(None, "--device", help="PyTorch device."),
     ema_decay: float = typer.Option(
-        0.999, "--ema-decay", help="Teacher EMA decay per step."
+        0.9996, "--ema-decay", help="Teacher EMA decay per step."
+    ),
+    lr0: float = typer.Option(0.0002, "--lr0", help="Initial Student learning rate (AdamW)."),
+    lrf: float = typer.Option(
+        0.01, "--lrf", help="Final learning rate as a fraction of lr0 (cosine schedule)."
     ),
     unsupervised_weight: float = typer.Option(
         1.0, "--unsupervised-weight", help="Weight lambda_u for pseudo loss."
@@ -1674,6 +1704,13 @@ def main(
     tail_ratio: float = typer.Option(
         0.25, "--tail-ratio", help="Fraction of GT placed at the tail of each epoch."
     ),
+    close_mosaic_ratio: float = typer.Option(
+        0.10,
+        "--close-mosaic-ratio",
+        help="Fraction of final epochs with GT Mosaic disabled (0 keeps Mosaic on throughout).",
+        min=0.0,
+        max=1.0,
+    ),
     gt_repeat: int = typer.Option(
         1, "--gt-repeat", help="Times the GT head is repeated in each epoch.", min=1
     ),
@@ -1682,14 +1719,22 @@ def main(
         "--pl-strong-aug/--no-pl-strong-aug",
         help="Strong Student augmentation (HSV, blur, erasing) on pseudo-labeled images.",
     ),
-    pl_images_per_epoch: Optional[int] = typer.Option(
-        None,
+    pl_images_per_epoch: int = typer.Option(
+        2400,
         "--pl-images-per-epoch",
-        help="Pseudo-label a fresh uniform random sample of this many unlabeled images each epoch.",
-        min=1,
+        help=(
+            "Pseudo-label a fresh uniform random sample of this many unlabeled images each epoch "
+            "(0 disables pseudo-labels: supervised fine-tuning control; -1 uses the whole pool)."
+        ),
+        min=-1,
+    ),
+    pl_cls_only: bool = typer.Option(
+        False,
+        "--pl-cls-only/--no-pl-cls-only",
+        help="Train pseudo boxes for classification only (no box/DFL regression towards Teacher boxes).",
     ),
     pl_soft_weights: bool = typer.Option(
-        False,
+        True,
         "--pl-soft-weights/--no-pl-soft-weights",
         help="Weight each pseudo box's loss by its score between its size bin's threshold and object mode.",
     ),
@@ -1776,16 +1821,26 @@ def main(
     chosen_imgsz = int(pick_val("imgsz", imgsz, "imgsz", 640))
     chosen_workers = int(pick_val("workers", workers, "workers", 4))
     chosen_device = pick_val("device", device, "device", None)
-    chosen_ema_decay = float(pick_val("ema_decay", ema_decay, "ema_decay", 0.999))
+    chosen_ema_decay = float(pick_val("ema_decay", ema_decay, "ema_decay", 0.9996))
+    chosen_lr0 = float(pick_val("lr0", lr0, "lr0", 0.0002))
+    chosen_lrf = float(pick_val("lrf", lrf, "lrf", 0.01))
     chosen_unsupervised_weight = float(pick_val("unsupervised_weight", unsupervised_weight, "unsupervised_weight", 1.0))
     chosen_unsupervised_warmup_epochs = int(pick_val("unsupervised_warmup_epochs", unsupervised_warmup_epochs, "unsupervised_warmup_epochs", 0))
     chosen_tail_ratio = float(pick_val("tail_ratio", tail_ratio, "tail_ratio", 0.25))
+    chosen_close_mosaic_ratio = float(pick_val("close_mosaic_ratio", close_mosaic_ratio, "close_mosaic_ratio", 0.10))
     chosen_gt_repeat = int(pick_val("gt_repeat", gt_repeat, "gt_repeat", 1))
     chosen_pl_strong_aug = bool(pick_val("pl_strong_aug", pl_strong_aug, "pl_strong_aug", False))
-    chosen_pl_images_per_epoch = pick_val("pl_images_per_epoch", pl_images_per_epoch, "pl_images_per_epoch", None)
+    if not was_specified("pl_images_per_epoch") and saved_cfg and "pl_images_per_epoch" in saved_cfg:
+        # A saved None means "whole pool" and must survive resume
+        chosen_pl_images_per_epoch = saved_cfg["pl_images_per_epoch"]
+    else:
+        chosen_pl_images_per_epoch = pl_images_per_epoch
     if chosen_pl_images_per_epoch is not None:
         chosen_pl_images_per_epoch = int(chosen_pl_images_per_epoch)
-    chosen_pl_soft_weights = bool(pick_val("pl_soft_weights", pl_soft_weights, "pl_soft_weights", False))
+        if chosen_pl_images_per_epoch < 0:
+            chosen_pl_images_per_epoch = None
+    chosen_pl_cls_only = bool(pick_val("pl_cls_only", pl_cls_only, "pl_cls_only", False))
+    chosen_pl_soft_weights = bool(pick_val("pl_soft_weights", pl_soft_weights, "pl_soft_weights", True))
     chosen_max_pseudo_images = pick_val("max_pseudo_images", max_pseudo_images, "max_pseudo_images", None)
     if chosen_max_pseudo_images is not None:
         chosen_max_pseudo_images = int(chosen_max_pseudo_images)
@@ -1807,13 +1862,17 @@ def main(
         workers=chosen_workers,
         device=chosen_device,
         ema_decay=chosen_ema_decay,
+        lr0=chosen_lr0,
+        lrf=chosen_lrf,
         unsupervised_weight=chosen_unsupervised_weight,
         unsupervised_warmup_epochs=chosen_unsupervised_warmup_epochs,
         tail_ratio=chosen_tail_ratio,
+        close_mosaic_ratio=chosen_close_mosaic_ratio,
         gt_repeat=chosen_gt_repeat,
         pl_strong_aug=chosen_pl_strong_aug,
         pl_images_per_epoch=chosen_pl_images_per_epoch,
         pl_soft_weights=chosen_pl_soft_weights,
+        pl_cls_only=chosen_pl_cls_only,
         max_pseudo_images=chosen_max_pseudo_images,
         pseudo_fallback_threshold=chosen_pseudo_fallback_threshold,
         save_candidates=chosen_save_candidates,
