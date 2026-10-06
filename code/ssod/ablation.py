@@ -16,6 +16,10 @@ Batches:
   settle    supervised fine-tuning control; slower Teacher, Mosaic closing, smaller pool
             on top of ema-0.9996 (runs/mean_teacher/ablation-settle)
   fractions 10/25/50% of GT labels: SSL vs. GT-only control (runs/mean_teacher/ablation-fractions)
+  architectures          YOLO26/YOLO11/YOLO12 at PL caps 4800/2400/1200 (runs/mean_teacher/ablation-architectures)
+  architectures-control  GT-only control per architecture (runs/mean_teacher/ablation-architectures-control)
+  fractions-2400         fractions on the final 2,400 cap, reusing the fractions warm-ups (runs/mean_teacher/ablation-fractions-2400)
+  components             leave-one-out of the final configuration from the tuned YOLO26m (runs/mean_teacher/ablation-components)
 
 Usage:
   uv run python code/ssod/ablation.py                  # batch "settle"
@@ -47,6 +51,9 @@ MEAN_TEACHER_SCRIPT = Path(__file__).resolve().parent / "mean_teacher.py"
 YOLO_CLI = Path(sys.executable).with_name("yolo")
 
 GT_DATA_YAML = Path("data/flow_img.yaml")
+DEFAULT_WARMUP_WEIGHTS = Path("runs/mean_teacher/ssod-v3-50-50/weights/warmup_best.pt")
+# Strongest supervised YOLO26m: hyperparameter-tuned, MuSGD, 50 epochs (SAHI experiments).
+TUNED_WARMUP_WEIGHTS = Path("code/sahi_experiments/yolo26m-FloW-plain.pt")
 GT_TRAIN_IMAGES = 1200  # FloW-img train split
 WARMUP_MODEL = "yolo26m.pt"
 WARMUP_STEPS = 3750  # the full-label warm-up: 50 epochs x 75 steps (batch 16)
@@ -56,10 +63,15 @@ VALID_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 @dataclass
 class Warmup:
-    """Supervised warm-up on a nested random subset of the GT train split."""
+    """
+    Supervised warm-up on the GT train split (or a nested random subset of it). Stored under
+    `root` when given (shared across batches), otherwise in the batch's project directory.
+    """
 
     fraction: float
     epochs: int
+    model: str = WARMUP_MODEL
+    root: Path | None = None
 
 
 @dataclass
@@ -71,6 +83,7 @@ class Batch:
     references: dict[str, Path] = field(default_factory=dict)
     warmups: dict[str, Warmup] = field(default_factory=dict)
     run_warmup: dict[str, str] = field(default_factory=dict)  # run -> warm-up name
+    warmup_weights: Path | None = None  # batch-wide starting weights (overrides the default)
 
 
 def matched_gt_repeat(
@@ -79,7 +92,7 @@ def matched_gt_repeat(
     """
     GT head repetition for a GT-only control so its epochs have as many samples (optimizer steps
     and Teacher EMA updates) as the SSL run it controls. `pl_images` is the mean number of
-    pseudo-labelled images per epoch observed with a 4,800-frame cap.
+    pseudo-labelled images per epoch observed with the SSL run's cap (default: 4,800-frame cap).
     """
     tail = round(n_gt * tail_ratio)
     head = n_gt - tail
@@ -103,11 +116,87 @@ BEST_SSL = [*CAP_SOFT, "--ema-decay", "0.9996"]
 BEST_SSL_100 = Path("runs/mean_teacher/ablation-drift/ema-0.9996")
 
 
-def fraction_batch(percents: tuple[int, ...] = (10, 25, 50)) -> Batch:
+# Full-label warm-ups for other architectures: same data and Ultralytics arguments as the YOLO26
+# warm-up (50 epochs), shared by the architecture SSL and control batches.
+WARMUP_ROOT = Path("runs/mean_teacher/warmups")
+ARCH_WARMUPS = {
+    arch: Warmup(fraction=1.0, epochs=50, model=f"{arch}m.pt", root=WARMUP_ROOT)
+    for arch in ("yolo11", "yolo12")
+}
+ARCH_CAPS = (4800, 2400, 1200)
+CAP_2400_PL_IMAGES = 2200  # mean pseudo-labelled images per epoch observed with the 2,400 cap
+
+
+def architecture_batches() -> tuple[Batch, Batch]:
+    """
+    SSL with the adopted configuration (soft weights, EMA 0.9996) at three PL caps for YOLO26,
+    YOLO11 and YOLO12, plus one GT-only control per architecture, step-matched to the 2,400 cap.
+    YOLO26 at 4,800 and 2,400 already exist with identical settings and are shown as references.
+    """
+    ssl_runs: dict[str, list[str]] = {}
+    control_runs: dict[str, list[str]] = {}
+    run_warmup: dict[str, str] = {}
+    control_warmup: dict[str, str] = {}
+    for arch in ("yolo26", "yolo11", "yolo12"):
+        model = ["--model", f"{arch}m.pt"]
+        for cap in ARCH_CAPS:
+            if arch == "yolo26" and cap != 1200:
+                continue  # references below
+            name = f"{arch}-cap{cap}"
+            ssl_runs[name] = [
+                *model, "--pl-images-per-epoch", str(cap), "--pl-soft-weights", "--ema-decay", "0.9996",
+            ]
+            if arch in ARCH_WARMUPS:
+                run_warmup[name] = f"{arch}m-warmup"
+        name = f"{arch}-gt-only"
+        control_runs[name] = [
+            *model,
+            "--pl-images-per-epoch", "0",
+            "--ema-decay", "0.9996",
+            "--gt-repeat", str(matched_gt_repeat(GT_TRAIN_IMAGES, pl_images=CAP_2400_PL_IMAGES)),
+        ]
+        if arch in ARCH_WARMUPS:
+            control_warmup[name] = f"{arch}m-warmup"
+
+    warmups = {f"{arch}m-warmup": spec for arch, spec in ARCH_WARMUPS.items()}
+    ssl = Batch(
+        project=Path("runs/mean_teacher/ablation-architectures"),
+        runs=ssl_runs,
+        references={
+            "yolo26-cap4800 (ref)": Path("runs/mean_teacher/ablation-drift/ema-0.9996"),
+            "yolo26-cap2400 (ref)": Path("runs/mean_teacher/ablation-settle/ema-0.9996-cap-2400"),
+        },
+        warmups=warmups,
+        run_warmup=run_warmup,
+    )
+    control = Batch(
+        project=Path("runs/mean_teacher/ablation-architectures-control"),
+        runs=control_runs,
+        references={
+            "yolo26-gt-only, 4800-matched (ref)": Path("runs/mean_teacher/ablation-settle/gt-only-control"),
+        },
+        warmups=warmups,
+        run_warmup=control_warmup,
+    )
+    return ssl, control
+
+
+FRACTIONS_PROJECT = Path("runs/mean_teacher/ablation-fractions")
+
+
+def fraction_batch(
+    ssl_args: list[str] = BEST_SSL,
+    pl_images: int = 4500,
+    project: Path = FRACTIONS_PROJECT,
+    warmup_root: Path | None = None,
+    references: dict[str, Path] | None = None,
+    percents: tuple[int, ...] = (10, 25, 50),
+) -> Batch:
     """
     SSL vs. GT-only control at several label fractions. The SSL run repeats GT 1/fraction times
     so each epoch keeps the same GT:PL sample ratio as the full-label run; the control repeats GT
-    to match the SSL run's samples per epoch.
+    to match the SSL run's samples per epoch (`pl_images`: mean PL images per epoch at its cap).
+    Warm-ups live in `warmup_root` when given (to reuse another batch's), else in `project`.
     """
     runs: dict[str, list[str]] = {}
     warmups: dict[str, Warmup] = {}
@@ -117,19 +206,21 @@ def fraction_batch(percents: tuple[int, ...] = (10, 25, 50)) -> Batch:
         n_gt = round(GT_TRAIN_IMAGES * fraction)
         ssl_repeat = round(1 / fraction)
         warmup = f"{pct}pct-warmup"
-        warmups[warmup] = Warmup(fraction=fraction, epochs=warmup_epochs(fraction))
-        runs[f"{pct}pct-ssl"] = [*BEST_SSL, "--gt-repeat", str(ssl_repeat)]
+        warmups[warmup] = Warmup(fraction=fraction, epochs=warmup_epochs(fraction), root=warmup_root)
+        runs[f"{pct}pct-ssl"] = [*ssl_args, "--gt-repeat", str(ssl_repeat)]
         runs[f"{pct}pct-gt-only"] = [
             "--pl-images-per-epoch", "0",
             "--ema-decay", "0.9996",
-            "--gt-repeat", str(matched_gt_repeat(n_gt, ssl_repeat)),
+            "--gt-repeat", str(matched_gt_repeat(n_gt, ssl_repeat, pl_images=pl_images)),
         ]
         run_warmup[f"{pct}pct-ssl"] = warmup
         run_warmup[f"{pct}pct-gt-only"] = warmup
     return Batch(
-        project=Path("runs/mean_teacher/ablation-fractions"),
+        project=project,
         runs=runs,
-        references={
+        references=references
+        if references is not None
+        else {
             "100pct-ssl (ref)": BEST_SSL_100,
             "100pct-gt-only (ref)": Path("runs/mean_teacher/ablation-settle/gt-only-control"),
         },
@@ -184,6 +275,37 @@ BATCHES: dict[str, Batch] = {
     ),
     "fractions": fraction_batch(),
 }
+BATCHES["architectures"], BATCHES["architectures-control"] = architecture_batches()
+# Leave-one-out contribution of each component of the final configuration, started from the
+# tuned supervised YOLO26m so the comparison is against the strongest supervised baseline.
+FINAL_SSL = ["--pl-images-per-epoch", "2400", "--pl-soft-weights", "--ema-decay", "0.9996"]
+BATCHES["components"] = Batch(
+    project=Path("runs/mean_teacher/ablation-components"),
+    runs={
+        "final": FINAL_SSL,
+        "gt-only": [
+            "--pl-images-per-epoch", "0",
+            "--ema-decay", "0.9996",
+            "--gt-repeat", str(matched_gt_repeat(GT_TRAIN_IMAGES, pl_images=CAP_2400_PL_IMAGES)),
+        ],
+        "no-soft-weights": ["--pl-images-per-epoch", "2400", "--no-pl-soft-weights", "--ema-decay", "0.9996"],
+        "fast-ema": ["--pl-images-per-epoch", "2400", "--pl-soft-weights", "--ema-decay", "0.999"],
+        "no-cap": ["--pl-images-per-epoch", "-1", "--pl-soft-weights", "--ema-decay", "0.9996"],  # slowest, last
+    },
+    warmup_weights=TUNED_WARMUP_WEIGHTS,
+)
+
+# Label fractions on the final configuration (2,400-frame cap), reusing the `fractions` warm-ups.
+BATCHES["fractions-2400"] = fraction_batch(
+    ssl_args=["--pl-images-per-epoch", "2400", "--pl-soft-weights", "--ema-decay", "0.9996"],
+    pl_images=CAP_2400_PL_IMAGES,
+    project=Path("runs/mean_teacher/ablation-fractions-2400"),
+    warmup_root=FRACTIONS_PROJECT,
+    references={
+        "100pct-ssl (ref)": Path("runs/mean_teacher/ablation-settle/ema-0.9996-cap-2400"),
+        "100pct-gt-only (ref)": Path("runs/mean_teacher/ablation-architectures-control/yolo26-gt-only"),
+    },
+)
 
 SUMMARY_FIELDS = [
     "run",
@@ -275,8 +397,10 @@ def format_table(table: list[dict[str, str]]) -> str:
     return "\n".join(lines)
 
 
-def subset_paths(fraction: float) -> tuple[Path, Path]:
-    """Image-list and data-YAML paths for a GT train subset."""
+def subset_paths(fraction: float) -> tuple[Path | None, Path]:
+    """Image-list and data-YAML paths for a GT train subset (the base YAML for the full split)."""
+    if fraction >= 1.0:
+        return None, GT_DATA_YAML.resolve()
     pct = round(fraction * 100)
     base_root = GT_DATA_YAML.resolve().parent
     return base_root / "flow_img" / "splits" / f"train_{pct}pct.txt", base_root / f"flow_img_{pct}pct.yaml"
@@ -289,7 +413,7 @@ def ensure_subset(fraction: float, logger) -> Path:
     split is unchanged. Existing files are kept, so subsets stay fixed across re-runs.
     """
     list_path, yaml_path = subset_paths(fraction)
-    if list_path.is_file() and yaml_path.is_file():
+    if list_path is None or (list_path.is_file() and yaml_path.is_file()):
         return yaml_path
 
     with open(GT_DATA_YAML, encoding="utf-8") as f:
@@ -335,7 +459,7 @@ def ensure_warmup(name: str, spec: Warmup, project: Path, dry_run: bool, logger)
     Supervised warm-up on a GT subset with the same Ultralytics arguments as
     MeanTeacherTrainer.run_warmup. Returns the best.pt path; skips if already complete.
     """
-    warmup_dir = project / name
+    warmup_dir = (spec.root.resolve() if spec.root is not None else project) / name
     best = warmup_dir / "weights" / "best.pt"
     done_marker = warmup_dir / "warmup.done"
     if done_marker.is_file() and best.is_file():
@@ -351,12 +475,12 @@ def ensure_warmup(name: str, spec: Warmup, project: Path, dry_run: bool, logger)
         cmd = [
             str(YOLO_CLI), "detect", "train",
             f"data={yaml_path}",
-            f"model={WARMUP_MODEL}",
+            f"model={spec.model}",
             f"epochs={spec.epochs}",
             "batch=16",
             "imgsz=640",
             "workers=4",
-            f"project={project}",
+            f"project={warmup_dir.parent}",
             f"name={name}",
             "exist_ok=True",
         ]
@@ -377,10 +501,13 @@ def ensure_warmup(name: str, spec: Warmup, project: Path, dry_run: bool, logger)
 
 @app.command()
 def main(
-    warmup_weights: Path = typer.Option(
-        Path("runs/mean_teacher/ssod-v3-50-50/weights/warmup_best.pt"),
+    warmup_weights: Optional[Path] = typer.Option(
+        None,
         "--warmup-weights",
-        help="Warm-up checkpoint shared by every run (runs with their own warm-up ignore it).",
+        help=(
+            "Warm-up checkpoint shared by every run (runs with their own warm-up ignore it). "
+            f"Defaults to the batch's own, else {DEFAULT_WARMUP_WEIGHTS}."
+        ),
         exists=True,
         dir_okay=False,
     ),
@@ -415,10 +542,11 @@ def main(
         )
 
     project = (project or spec.project).resolve()
+    warmup_weights = (warmup_weights or spec.warmup_weights or DEFAULT_WARMUP_WEIGHTS).resolve()
     project.mkdir(parents=True, exist_ok=True)
     logger = get_logger(log_file=project / "ablation.log")
     logger.info(
-        f"Ablation batch {batch!r}: runs={runs}, epochs={epochs}, warmup={warmup_weights.resolve()}, project={project}"
+        f"Ablation batch {batch!r}: runs={runs}, epochs={epochs}, warmup={warmup_weights}, project={project}"
     )
 
     for run in runs:
@@ -428,7 +556,7 @@ def main(
             logger.info(f"[{run}] already finished ({done}/{epochs} epochs), skipping.")
             continue
 
-        run_warmup_weights = warmup_weights.resolve()
+        run_warmup_weights = warmup_weights
         run_data_args: list[str] = []
         warmup_name = spec.run_warmup.get(run)
         if warmup_name is not None:
@@ -440,7 +568,8 @@ def main(
             except RuntimeError as e:
                 logger.error(f"{e}. Skipping {run}.")
                 continue
-            run_data_args = ["--gt-yaml", str(subset_paths(warmup_spec.fraction)[1])]
+            if warmup_spec.fraction < 1.0:
+                run_data_args = ["--gt-yaml", str(subset_paths(warmup_spec.fraction)[1])]
 
         cmd = [sys.executable, str(MEAN_TEACHER_SCRIPT)]
         if (run_dir / "weights" / "paused.pt").is_file() or (

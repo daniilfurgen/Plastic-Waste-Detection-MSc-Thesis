@@ -15,7 +15,7 @@ Based on the batches below, the trainer's defaults are now:
 
 | Setting | Default | Why |
 |---|---|---|
-| `--pl-images-per-epoch` | 2400 | Less pseudo-data per epoch was better at every step (27k → 4,800 → 2,400 frames). |
+| `--pl-images-per-epoch` | 2400 | The optimum for YOLO26 at full labels: 27k → 4,800 → 2,400 frames kept improving, and 1,200 loses the gain over the GT-only control (`architectures`). With 10–25% of the labels, 4,800 does slightly better (`fractions-2400`); that's left as future work. |
 | `--pl-soft-weights` | on | Part of every best configuration since `pool`. |
 | `--ema-decay` | 0.9996 | Removes most of the late drift; 0.9998 adds nothing. |
 
@@ -27,8 +27,9 @@ full pool via `--pl-images-per-epoch -1`), so they reproduce exactly.
 Every run in a batch:
 
 - starts from the same warm-up weights (`runs/mean_teacher/ssod-v3-50-50/weights/warmup_best.pt`),
-  so there is no warm-up variance and no warm-up time. The exception is `fractions`, where each
-  label fraction has its own warm-up, shared by that fraction's runs;
+  so there is no warm-up variance and no warm-up time. The exceptions are `fractions` and
+  `fractions-2400`, where each label fraction has its own warm-up (shared by both batches), and
+  `architectures`, where YOLO11 and YOLO12 have their own;
 - trains for the same number of SSL epochs (default 15), so the cosine LR schedule and mosaic
   closing are identical;
 - uses the same seed, and the standard FloW-img val split (so numbers stay comparable with other
@@ -42,7 +43,11 @@ Each batch changes one setting per run relative to a base configuration.
 
 ```bash
 uv run python code/ssod/ablation.py                   # default batch: settle
-uv run python code/ssod/ablation.py --batch fractions # label-fraction evaluation
+uv run python code/ssod/ablation.py --batch components      # leave-one-out from the tuned YOLO26m
+uv run python code/ssod/ablation.py --batch fractions-2400  # label fractions, final configuration
+uv run python code/ssod/ablation.py --batch fractions # label fractions, 4,800 cap
+uv run python code/ssod/ablation.py --batch architectures && \
+  uv run python code/ssod/ablation.py --batch architectures-control
 uv run python code/ssod/ablation.py --batch pool      # an earlier batch
 uv run python code/ssod/ablation.py --only cls-only   # a single run
 uv run python code/ssod/ablation.py --dry-run         # print commands only
@@ -190,8 +195,173 @@ Takeaways:
   the full-label supervised baseline (0.430). The final epoch is 0.421.
 - **Single seed.** The 10–25% gaps (~0.02, consistent across epochs) are robust. Differences of
   ~0.005 at 100% are borderline.
-- **These runs used the 4,800-frame cap.** Re-running them with the cap chosen by the architecture
-  batches would put every point on the curve on the final configuration.
+- **These runs used the 4,800-frame cap.** `fractions-2400` repeats them on the final configuration.
+
+### `architectures` and `architectures-control`: PL cap across YOLO26, YOLO11 and YOLO12
+
+Outputs: `runs/mean_teacher/ablation-architectures/` (SSL) and
+`runs/mean_teacher/ablation-architectures-control/` (GT-only controls). These choose the PL cap for
+the final label-fraction runs, and compare YOLO26 with YOLO11 and YOLO12 under identical conditions:
+the same data, warm-up budget (50 epochs) and SSL pipeline. The protocol is deliberately not tuned
+per architecture.
+
+| Run | Setting |
+|---|---|
+| `<arch>-cap4800`, `<arch>-cap2400`, `<arch>-cap1200` | adopted configuration (soft weights, EMA 0.9996) at each cap |
+| `<arch>-gt-only` | no pseudo-labels; GT repeated 3× to match the steps of a 2,400-cap run |
+
+- **YOLO26.** Uses the existing warm-up. Its 4,800 and 2,400 runs already exist with identical
+  settings (`drift/ema-0.9996`, `settle/ema-0.9996-cap-2400`), so they're shown as references; only
+  the 1,200 run and a 2,400-matched control are new.
+- **YOLO11 and YOLO12.** Each gets a full-label supervised warm-up with the same data and
+  Ultralytics arguments as the YOLO26 one (50 epochs). The warm-ups are stored in
+  `runs/mean_teacher/warmups/` and shared by both batches.
+- **Different loss path.** YOLO11 and YOLO12 aren't end-to-end models: they use the standard YOLO
+  loss and NMS at inference.
+- **Run order.** Run `architectures` first, so the warm-ups exist before the controls need them.
+
+Result after 15 epochs (mAP50-95; "late mean" = mean of epochs 8–15; controls are step-matched to
+the 2,400 cap):
+
+| Model | Supervised (epoch 0) | GT-only control | Cap 4,800 | Cap 2,400 | Cap 1,200 |
+|---|---|---|---|---|---|
+| YOLO26m | 0.430 | 0.436 (late 0.436) | 0.439 (late 0.441) | **0.444 (late 0.445)** | 0.436 (late 0.436) |
+| YOLO11m | 0.408 | **0.425 (late 0.423)** | 0.414 (late 0.417) | 0.420 (late 0.420) | 0.422 (late 0.421) |
+| YOLO12m | 0.414 | **0.422 (late 0.422)** | 0.412 (late 0.415) | 0.416 (late 0.419) | 0.418 (late 0.419) |
+
+Minutes per SSL epoch at caps 4,800 / 2,400 / 1,200: YOLO26 2.5 / 1.6 / 1.1, YOLO11
+2.2 / 1.4 / 1.0, YOLO12 3.5 / 2.0 / 1.6.
+
+Takeaways:
+- **For YOLO26, 2,400 is the optimum.** It's the only cap that clearly beats the control: +0.009 at
+  epoch 15 and +0.009 on the late mean. At 1,200 the gain disappears (0.4355 vs. the control's
+  0.4356), and at 4,800 it's smaller and drifts. So pseudo-data volume has an inverted-U effect.
+- **For YOLO11 and YOLO12, no cap beats the GT-only control.** Their ranking (1,200 ≥ 2,400 > 4,800)
+  isn't an optimum: smaller caps only bring the run closer to the control, so less pseudo-data means
+  less harm, not more gain.
+- **Pseudo-label quality doesn't explain the difference.** On labelled val, each architecture's
+  starting Teacher at its own first-epoch thresholds gives almost the same pseudo-label precision and
+  recall (P 0.814–0.828, R 0.822–0.824; small boxes P 0.73–0.75 for all three).
+- **Under the shared 50-epoch budget, YOLO11 and YOLO12 hadn't converged.**
+  - They start lower (0.408 and 0.414 vs. 0.430), and their warm-ups were still improving at epoch 50
+    (YOLO11's best epoch was its last).
+  - Extra supervised fine-tuning is worth much more to them: their GT-only controls gain +0.017 and
+    +0.008, against +0.005 for YOLO26. YOLO11's control is still rising at epoch 15.
+  - The control sees ground truth 3× per epoch, while SSL runs see it once plus pseudo-labels, so an
+    under-trained model gets more from the control.
+- **YOLO26 comes out ahead under identical conditions.** It's the strongest supervised model at the
+  same warm-up budget, the only one where SSL beats step-matched supervised fine-tuning, and the best
+  result overall: 0.444, against 0.425 for the best YOLO11 run (its control).
+- **Scope.** Whether SSL would help YOLO11 or YOLO12 after a longer, converged warm-up wasn't tested,
+  because the point was a same-conditions comparison. For the thesis, state it as a limitation:
+  "Under an equal 50-epoch warm-up budget, YOLO11m and YOLO12m had not yet converged, and additional
+  supervised fine-tuning outperformed pseudo-labelling; whether SSL benefits them after full
+  convergence was not investigated."
+- **Controls are step-matched to the 2,400 cap only.** Cap 4,800 runs train ~1.7× more steps per
+  epoch than the control and cap 1,200 runs ~0.75× as many. Compare each cap mainly within its row.
+- **Single seed.** Gaps under ~0.005 (e.g. YOLO12's caps against each other) are within noise.
+
+### `fractions-2400`: label fractions on the final configuration
+
+Output: `runs/mean_teacher/ablation-fractions-2400/`. This repeats `fractions` with YOLO26 at the
+adopted 2,400-frame cap, so every point on the label-efficiency curve uses the final configuration.
+
+- **Warm-ups.** Reused from `fractions` (`runs/mean_teacher/ablation-fractions/<N>pct-warmup`),
+  so the supervised baselines are identical and no warm-up time is spent.
+- **`<N>pct-ssl`.** Cap 2,400, soft weights, EMA 0.9996. GT is repeated 1/fraction times (10, 4, 2),
+  as in `fractions`.
+- **`<N>pct-gt-only`.** No pseudo-labels; GT is repeated 34×, 14× and 7× to match the steps of the
+  2,400-cap SSL runs.
+- **100% references.** `settle/ema-0.9996-cap-2400` (SSL) and `architectures-control/yolo26-gt-only`
+  (its 2,400-matched control).
+
+The batch took about 2 h: ~1.5 min per SSL epoch and ~1.0 min per control epoch.
+
+Result after 15 epochs (mAP50-95; "late mean" = mean of epochs 8–15):
+
+| GT labels | Supervised (epoch 0) | GT-only control | SSL | SSL − control | SSL − control, late mean |
+|---|---|---|---|---|---|
+| 10% | 0.341 | 0.340 | **0.356** | +0.016 | +0.010 |
+| 25% | 0.378 | 0.379 | **0.394** | +0.015 | +0.011 |
+| 50% | 0.412 | 0.414 | **0.425** | +0.011 | +0.009 |
+| 100% | 0.430 | 0.436 | **0.444** | +0.009 | +0.009 |
+
+Takeaways:
+- **SSL beats its step-matched control at every label fraction on the final configuration.** The
+  gain grows as labels shrink. The curves are stable, with no post-peak drift at any fraction.
+- **The SSL − control gaps are smaller than in `fractions`, partly because of the controls.** The
+  2,400-matched controls repeat GT fewer times (34/14/7× vs. 60/24/12×), so they overfit less and
+  score higher. Don't compare the gaps across the two batches; compare the SSL runs directly (below).
+
+#### Cap vs. label fraction (open question)
+
+Both batches share the same warm-ups, so their SSL runs are directly comparable:
+
+| GT labels | Cap 4,800 (late mean / final) | Cap 2,400 (late mean / final) | Better cap |
+|---|---|---|---|
+| 10% | **0.362** / 0.360 | 0.354 / 0.356 | 4,800 (+0.007) |
+| 25% | **0.399** / 0.397 | 0.393 / 0.394 | 4,800 (+0.006) |
+| 50% | 0.425 / 0.421 | 0.425 / **0.425** | tie on late mean; 4,800 peaks at 0.4295 (epoch 8) then drifts |
+| 100% | 0.441 / 0.439 | **0.445** / 0.444 | 2,400 (+0.005) |
+
+- **The best amount of pseudo-data per epoch shrinks as labels grow.** At 10% and 25%, 4,800 is ahead
+  at every sampled epoch: with only 120–300 unique labelled images, fresh pseudo-labelled frames are
+  worth more than their noise.
+- **Drift sets in sooner as the supervised Teacher gets stronger.** At 50%, the larger cap peaks
+  higher but drifts like the 100% runs. At 100% the drift wins outright.
+- **Not pursued in this thesis.** Choosing the cap per fraction on the val split would be optimistic,
+  because the same split is used for reporting. Testing it properly needs more points (e.g. 10% at
+  9,600) and seeds. The main results use the fixed 2,400 default, and this table is reported as a
+  sensitivity analysis. How the optimal pseudo-data volume depends on label budget and Teacher
+  strength is left for future work.
+
+### `components`: what each part of the final configuration contributes
+
+Output: `runs/mean_teacher/ablation-components/`. Every earlier batch started from our untuned
+50-epoch warm-up (`auto` optimizer → AdamW; 0.431 COCO mAP50-95). The supervised YOLO26m from the SAHI
+experiments (`code/sahi_experiments/yolo26m-FloW-plain.pt`) was hyperparameter-tuned and trained
+with MuSGD, and scores **0.448** on the same val split and evaluator. That's slightly above our
+best Mean Teacher run (0.446 best epoch / 0.444 final).
+
+This batch therefore starts every run from the tuned model, so the final configuration is measured
+against the strongest supervised baseline. Each run removes one component (leave-one-out):
+
+| Run | Change from `final` | Component tested |
+|---|---|---|
+| `final` | — (cap 2,400, soft weights, EMA 0.9996) | reference |
+| `gt-only` | no pseudo-labels; GT repeated 3× (2,400-matched steps) | pseudo-labels as a whole |
+| `no-soft-weights` | hard pseudo-labels | soft per-box weights |
+| `fast-ema` | Teacher EMA 0.999 | slow Teacher |
+| `no-cap` | whole pool (~27k frames per epoch) | pseudo-label cap |
+
+`no-cap` runs last because it's ~7× slower per epoch. Expect about 4 h in total.
+
+## Exporting results for the thesis
+
+```bash
+uv run python code/ssod/export_results.py
+```
+
+[`export_results.py`](export_results.py) reads the run folders and writes raw-number CSVs into
+`paper/exp-results/`. Formatting and labels are left to Typst. Tables whose runs don't exist yet are
+skipped with a warning, so re-run it as batches finish.
+
+All metrics in these files are COCO metrics (pycocotools). They can differ from the Ultralytics
+mAP50-95 quoted in this README by about ±0.001.
+
+| File | Contents |
+|---|---|
+| `ssod_main_comparison.csv` | Tuned supervised YOLO26m, naive self-training (best round) and Mean Teacher (`components/final`, best epoch): full COCO metrics. |
+| `ssod_self_training_rounds.csv` | The naive self-training baseline per round. Its method is iterative self-training with hard pseudo-labels, not Noisy Student (no noise, no student growth). |
+| `ssod_mt_settings_summary.csv` | One row per development run (`pool` → `architectures`, YOLO26m): its settings (cap, soft weights, EMA, variant) plus supervised, final, late-mean and best mAP50-95. |
+| `ssod_mt_settings_curves.csv` | The same runs per epoch, in long format, for training-curve plots. |
+| `ssod_mt_long_runs_curves.csv` | The 50–100-epoch runs before the ablation (v2 with the threshold and loss-gain bugs, v3 with the full pool). |
+| `ssod_components.csv`, `ssod_components_curves.csv` | The `components` batch, including the change from `final`. |
+| `ssod_architectures.csv` | Supervised, GT-only control and each cap for YOLO26m, YOLO11m and YOLO12m. |
+| `ssod_label_fractions.csv` | Supervised, GT-only control and SSL at 10/25/50/100% labels, for both caps. |
+
+In the curve files, `pl_cap` is 27302 for the whole pool and 0 for GT-only controls; epoch 0 is the
+supervised starting point.
 
 ## Settings referenced above
 
@@ -200,6 +370,7 @@ Takeaways:
 | `--pl-images-per-epoch N` | Pseudo-label a fresh random sample of N unlabeled frames each epoch (default 2,400) instead of all ~27k. Sampling whole images keeps the small/medium/large box mix unchanged. `0` disables pseudo-labels (GT-only control); `-1` uses the whole pool. |
 | `--gt-repeat k` | Repeat the GT part of each epoch (except the 25% tail) k times. |
 | `--gt-yaml` | Ground-truth dataset YAML (used for the label-fraction subsets). |
+| `--model` | Architecture name recorded with the run; the weights themselves come from `--warmup-weights`. |
 | `--pl-soft-weights` (default on) | Weight each pseudo-box's loss by its confidence relative to its size bin: 0 at the bin's threshold, 1 at the bin's typical high score. Small objects are judged against small-object scores. Boxes near the threshold get ~0 weight and are effectively ignored, not treated as background. |
 | `--pl-strong-aug` | Stronger colour jitter, blur and random erasing on pseudo-labelled images only. |
 | `--unsupervised-weight λ` | Multiply the pseudo-label loss by λ. |
