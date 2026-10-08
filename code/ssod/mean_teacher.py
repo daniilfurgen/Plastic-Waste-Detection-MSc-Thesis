@@ -463,15 +463,15 @@ def configure_student_criterion(model: nn.Module) -> Any:
     return criterion
 
 
-def pl_stat_columns(gen_out: dict[str, Any] | None) -> dict[str, float]:
-    """Per-epoch pseudo-label statistics for results.csv (zeros when no labels were generated)."""
-    gen_out = gen_out or {}
-    filtered = gen_out.get("filtered_df")
-    bin_stats = gen_out.get("bin_stats", {})
-    columns: dict[str, float] = {
-        "pl_images": float(gen_out.get("labeled_images", 0)),
-        "pl_boxes": float(len(filtered)) if filtered is not None else 0.0,
-    }
+def pl_stat_columns(gen_out: Any | None) -> dict[str, float]:
+    """
+    Per-epoch pseudo-label statistics for results.csv from a PseudoLabelResult (zeros when no
+    labels were generated).
+    """
+    labeled_images = gen_out.labeled_images if gen_out is not None else 0
+    boxes = len(gen_out.filtered_df) if gen_out is not None else 0
+    bin_stats = gen_out.bin_stats if gen_out is not None else {}
+    columns: dict[str, float] = {"pl_images": float(labeled_images), "pl_boxes": float(boxes)}
     for sb in ("small", "medium", "large"):
         columns[f"pl_share/{sb}"] = float(bin_stats.get(sb, {}).get("share", 0.0))
     for sb in ("small", "medium", "large"):
@@ -1415,7 +1415,7 @@ class MeanTeacherTrainer:
                     import polars as pl
 
                     self.logger.info("Pseudo-labeling disabled (pl_images_per_epoch=0): GT-only epoch.")
-                    gen_out: dict[str, Any] = {}
+                    gen_out = None
                     dataset_handler.reload_pseudo_labels(filtered_df=pl.DataFrame())
                 else:
                     teacher.save(str(last_path))
@@ -1441,9 +1441,7 @@ class MeanTeacherTrainer:
                         sample_images=self.config.pl_images_per_epoch,
                         sample_seed=self.config.seed + epoch,
                     )
-                    dataset_handler.reload_pseudo_labels(
-                        filtered_df=gen_out.get("filtered_df")
-                    )
+                    dataset_handler.reload_pseudo_labels(filtered_df=gen_out.filtered_df)
 
                 # B. Configure epoch (25% GT tail sampling, 10% mosaic closing)
                 train_loader = dataset_handler.get_train_loader(persistent_workers=True)
@@ -1551,7 +1549,7 @@ class MeanTeacherTrainer:
                 )
 
                 # Record epoch log with confidence thresholds
-                thresholds = gen_out.get("thresholds", {}) if gen_out else {}
+                thresholds = gen_out.thresholds if gen_out is not None else {}
                 record = {
                     "epoch": epoch + 1,
                     "train_loss": mean_train_loss,

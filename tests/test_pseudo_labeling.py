@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 import cv2
 import numpy as np
+import polars as pl
 import torch
 from ultralytics.engine.results import Boxes
 
@@ -24,13 +25,16 @@ if str(CODE_DIR) not in sys.path:
     sys.path.insert(0, str(CODE_DIR))
 
 from ssod.pseudo_labeling import (  # noqa: E402
+    BinThreshold,
     PseudoLabelGenerator,
     assign_size_bin,
     box_weights,
+    fit_bin_threshold,
     ground_modes,
     ground_threshold,
     input_scale,
     sample_image_files,
+    select_pseudo_labels,
 )
 
 
@@ -196,30 +200,30 @@ class TestGeneratorSwitches(unittest.TestCase):
     def test_per_bin_thresholds_by_default(self):
         _, mocked, out = self._generate([(0.3, 0.8), (0.3, 0.8), (0.3, 0.8)])
         self.assertEqual(mocked.call_count, 3)
-        self.assertEqual(len(out["filtered_df"]), 6)
+        self.assertEqual(len(out.filtered_df), 6)
 
     def test_shared_threshold_without_size_bins(self):
         _, mocked, out = self._generate([(0.7, 0.9)], size_bins=False)
         self.assertEqual(mocked.call_count, 1)
         self.assertEqual(len(mocked.call_args.args[0]), 6)  # every candidate, all bins
-        self.assertEqual(set(out["thresholds"].values()), {0.7})
+        self.assertEqual(set(out.thresholds.values()), {0.7})
         # the large boxes (score 0.5) fall below the shared threshold
-        self.assertEqual(out["filtered_df"]["size_bin"].unique().to_list(), ["small"])
+        self.assertEqual(out.filtered_df["size_bin"].unique().to_list(), ["small"])
 
     def test_single_view_skips_flip_inference(self):
         multi, _, _ = self._generate([(0.3, 0.8)] * 3)
         single, _, out = self._generate([(0.3, 0.8)] * 3, multi_view=False)
         self.assertEqual(multi.predict_calls, 2)
         self.assertEqual(single.predict_calls, 1)
-        self.assertEqual(len(out["filtered_df"]), 6)
+        self.assertEqual(len(out.filtered_df), 6)
 
     def test_input_scale_bins_follow_network_input(self):
         # 256 px images at imgsz=64 are shrunk 4x: the 200 px box (large in original pixels)
         # becomes 50 px at the input, i.e. medium
         _, _, scaled = self._generate([(0.3, 0.8)] * 3, imgsz=64)
         _, _, original = self._generate([(0.3, 0.8)] * 3, imgsz=64, input_scale_bins=False)
-        self.assertEqual(sorted(scaled["filtered_df"]["size_bin"].unique().to_list()), ["medium", "small"])
-        self.assertEqual(sorted(original["filtered_df"]["size_bin"].unique().to_list()), ["large", "small"])
+        self.assertEqual(sorted(scaled.filtered_df["size_bin"].unique().to_list()), ["medium", "small"])
+        self.assertEqual(sorted(original.filtered_df["size_bin"].unique().to_list()), ["large", "small"])
 
 
 class TestSizeBins(unittest.TestCase):
@@ -234,4 +238,55 @@ class TestSizeBins(unittest.TestCase):
         self.assertEqual(assign_size_bin(100, 100), "large")
         self.assertEqual(assign_size_bin(100, 100, input_scale(4000, 3000, 640)), "small")
         self.assertEqual(assign_size_bin(40, 40, 1.0), "medium")
+
+
+class TestFitBinThreshold(unittest.TestCase):
+    """Test the per-bin ground threshold and its fallback."""
+
+    def test_valley_threshold(self):
+        rng = np.random.default_rng(0)
+        scores = np.concatenate([rng.uniform(0.0, 0.1, 2000), rng.uniform(0.75, 0.95, 400)])
+        fitted = fit_bin_threshold(scores, conf_floor=0.0, fallback=0.4)
+        self.assertTrue(fitted.from_valley)
+        self.assertGreater(fitted.threshold, 0.1)
+        self.assertLess(fitted.threshold, 0.75)
+        self.assertGreater(fitted.object_mode, fitted.threshold)
+
+    def test_fallback_without_valley(self):
+        scores = np.array([0.5, 0.6, 0.7, 0.8, 0.9])
+        with patch("ssod.pseudo_labeling.ground_modes", return_value=None):
+            fitted = fit_bin_threshold(scores, conf_floor=0.0, fallback=0.4)
+        self.assertEqual(fitted, BinThreshold(0.4, float(np.percentile(scores, 90)), False))
+
+    def test_fallback_object_mode_without_scores_above(self):
+        fitted = fit_bin_threshold(np.array([0.1, 0.2]), conf_floor=0.0, fallback=0.4)
+        self.assertEqual((fitted.threshold, fitted.object_mode), (0.4, 1.0))
+
+
+class TestSelectPseudoLabels(unittest.TestCase):
+    """Test per-bin filtering and soft weights of the candidate table."""
+
+    def setUp(self):
+        self.candidates = pl.DataFrame(
+            {"size_bin": ["small", "small", "large", "large"], "score": [0.2, 0.6, 0.5, 0.9]},
+            schema={"size_bin": pl.String, "score": pl.Float32},
+        )
+        self.thresholds = {
+            "small": BinThreshold(0.3, 0.7, True),
+            "large": BinThreshold(0.5, 0.9, True),
+        }
+
+    def test_filters_by_bin_threshold(self):
+        labels = select_pseudo_labels(self.candidates, self.thresholds, soft_weights=False)
+        self.assertEqual(labels["score"].to_list(), [np.float32(0.6), np.float32(0.5), np.float32(0.9)])
+        self.assertEqual(labels["weight"].to_list(), [1.0, 1.0, 1.0])
+
+    def test_soft_weights(self):
+        labels = select_pseudo_labels(self.candidates, self.thresholds, soft_weights=True)
+        np.testing.assert_allclose(labels["weight"].to_numpy(), [0.75, 0.0, 1.0], atol=1e-6)
+
+    def test_no_thresholds_gives_empty_table(self):
+        labels = select_pseudo_labels(self.candidates, {}, soft_weights=True)
+        self.assertTrue(labels.is_empty())
+        self.assertIn("weight", labels.columns)
 
