@@ -45,6 +45,7 @@ Each batch changes one setting per run relative to a base configuration.
 uv run python code/ssod/ablation.py                   # default batch: settle
 uv run python code/ssod/ablation.py --batch mechanisms      # leave-one-out of the PL mechanisms
 uv run python code/ssod/ablation.py --batch add-one-in      # each component alone on a stripped base
+uv run python code/ssod/ablation.py --batch seeds           # seed repeats of final / simple / minimal / gt-only
 uv run python code/ssod/ablation.py --batch components      # leave-one-out from the tuned YOLO26m
 uv run python code/ssod/ablation.py --batch fractions-2400  # label fractions, final configuration
 uv run python code/ssod/ablation.py --batch fractions # label fractions, 4,800 cap
@@ -411,6 +412,30 @@ The slow EMA counts as a component here, with the original 0.999 as "off". With 
 the stripped run is expected to peak early and then decline, so compare runs mainly on their best
 epoch. Expect about 2.5 h in total.
 
+### `seeds`: is the full configuration better than a simple one?
+
+Output: `runs/mean_teacher/ablation-seeds/`. In `mechanisms` and `add-one-in`, two identical runs
+differed by up to 0.0036 mAP50-95 at the best epoch, as much as any single component's effect. This
+batch repeats the configurations the conclusions rest on with seeds 43 and 44 (`--seed`), from the
+same untuned warm-up. The existing seed-42 runs complete each set.
+
+| Config | Configuration | Seed-42 runs |
+|---|---|---|
+| `final` | cap 2,400, soft weights, size bins, multi-view, GT tail, EMA 0.9996 | `settle/ema-0.9996-cap-2400`, `mechanisms/final-rerun` |
+| `simple` | cap 2,400 and EMA 0.9996 only (shared threshold, single view, no GT tail, hard labels) | `add-one-in/plus-slow-ema` |
+| `minimal` | cap 2,400 only, EMA 0.999 | `add-one-in/minimal`, `add-one-in/minimal-rerun` |
+| `gt-only` | no pseudo-labels, 2,400-matched steps | `architectures-control/yolo26-gt-only` |
+
+Questions, compared on mean ± standard deviation over seeds:
+- `final` vs. `simple`: do soft weights, size bins, multi-view and the GT tail together add
+  anything, or only complexity? If they don't separate, the simpler pipeline is the better one.
+- `simple` vs. `minimal`: what the slow Teacher adds, at the best epoch and after it.
+- `simple` and `final` vs. `gt-only`: is the SSL gain larger than the seed spread?
+
+`--seed` sets the per-epoch pseudo-label sample, the epoch ordering and, since this batch, the
+global Python/NumPy/PyTorch RNGs that drive augmentation and DataLoader workers. The seed-42 runs
+predate the global seeding, so they're independent samples, not exact repeats. Expect about 3 h.
+
 ## Exporting results for the thesis
 
 ```bash
@@ -434,6 +459,7 @@ mAP50-95 quoted in this README by about ±0.001.
 | `ssod_components.csv`, `ssod_components_curves.csv` | The `components` batch, including the change from `final`. |
 | `ssod_mechanisms.csv`, `ssod_mechanisms_curves.csv` | The `mechanisms` batch with its `final` and `gt-only` references, including the change from `final`. |
 | `ssod_add_one_in.csv`, `ssod_add_one_in_curves.csv` | The `add-one-in` batch with its references, including the change from `minimal`. |
+| `ssod_seed_runs.csv`, `ssod_seed_summary.csv` | One row per seed run of `final`, `simple`, `minimal` and `gt-only` (best-epoch metrics, late mean, final), and their mean and standard deviation per configuration. |
 | `ssod_architectures.csv` | Supervised, GT-only control and each cap for YOLO26m, YOLO11m and YOLO12m. |
 | `ssod_label_fractions.csv` | Supervised, GT-only control and SSL at 10/25/50/100% labels, for both caps. |
 
@@ -455,6 +481,7 @@ supervised starting point.
 | `--pl-strong-aug` | Stronger colour jitter, blur and random erasing on pseudo-labelled images only. |
 | `--unsupervised-weight λ` | Multiply the pseudo-label loss by λ. |
 | `--pl-cls-only` | Pseudo-boxes contribute to the classification loss only, with no box regression. Ground-truth boxes are unaffected. |
+| `--seed n` | Seed for the per-epoch pseudo-label sample, epoch ordering and augmentation (default 42). |
 | `--lr0`, `--ema-decay` | Student learning rate and Teacher EMA decay (default 0.9996). |
 | `--close-mosaic-ratio r` | Fraction of final epochs with GT Mosaic off (default 0.1; 0 keeps it on throughout). |
 

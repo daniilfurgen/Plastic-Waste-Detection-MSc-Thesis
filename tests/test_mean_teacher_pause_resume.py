@@ -76,6 +76,7 @@ class TestMeanTeacherCLIOptions(unittest.TestCase):
                         "--pl-cls-only",
                         "--no-pl-size-bins",
                         "--no-pl-multi-view",
+                        "--seed", "7",
                         "--close-mosaic-ratio", "0",
                         "--project", str(test_dir),
                         "--name", "cli",
@@ -90,6 +91,7 @@ class TestMeanTeacherCLIOptions(unittest.TestCase):
             self.assertTrue(cfg.pl_soft_weights)  # adopted default
             self.assertFalse(cfg.pl_size_bins)
             self.assertFalse(cfg.pl_multi_view)
+            self.assertEqual(cfg.seed, 7)
         finally:
             shutil.rmtree(test_dir, ignore_errors=True)
 

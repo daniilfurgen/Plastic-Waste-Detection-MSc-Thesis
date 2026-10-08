@@ -879,7 +879,7 @@ class MeanTeacherTrainer:
                             setattr(self.config, k, Path(v).resolve())
                         elif k in ("unsupervised_weight", "ema_decay", "tail_ratio", "close_mosaic_ratio", "lr0", "lrf", "pseudo_fallback_threshold"):
                             setattr(self.config, k, float(v))
-                        elif k in ("ssl_epochs", "warmup_epochs", "batch_size", "imgsz", "workers", "unsupervised_warmup_epochs", "gt_repeat"):
+                        elif k in ("ssl_epochs", "warmup_epochs", "batch_size", "imgsz", "workers", "unsupervised_warmup_epochs", "gt_repeat", "seed"):
                             setattr(self.config, k, int(v))
                         elif k in ("pl_strong_aug", "pl_soft_weights", "pl_cls_only", "pl_size_bins", "pl_multi_view"):
                             setattr(self.config, k, bool(v))
@@ -1107,6 +1107,11 @@ class MeanTeacherTrainer:
         Supports resuming from checkpoint and handles KeyboardInterrupt gracefully.
         """
         _load_heavy_dependencies()
+        from ultralytics.utils.torch_utils import init_seeds
+
+        # Global RNGs drive augmentation and DataLoader worker seeds; sampling and ordering use
+        # their own generators seeded from the same value
+        init_seeds(self.config.seed)
         resume_target = resume_checkpoint or self.config.resume
 
         last_path = self.weights_dir / "last.pt"
@@ -1770,6 +1775,11 @@ def main(
         "--project",
         help="Output project directory [default: runs/mean_teacher or inferred from --resume].",
     ),
+    seed: int = typer.Option(
+        42,
+        "--seed",
+        help="Seed for pseudo-label image sampling, epoch ordering and augmentation RNGs.",
+    ),
     name: Optional[str] = typer.Option(
         None,
         "--name",
@@ -1862,6 +1872,7 @@ def main(
         chosen_max_pseudo_images = int(chosen_max_pseudo_images)
     chosen_pseudo_fallback_threshold = float(pick_val("pseudo_fallback_threshold", pseudo_fallback_threshold, "pseudo_fallback_threshold", 0.4))
     chosen_save_candidates = bool(pick_val("save_candidates", save_candidates, "save_candidates", False))
+    chosen_seed = int(pick_val("seed", seed, "seed", 42))
 
     cfg = MeanTeacherConfig(
         model_name=str(chosen_model),
@@ -1894,6 +1905,7 @@ def main(
         max_pseudo_images=chosen_max_pseudo_images,
         pseudo_fallback_threshold=chosen_pseudo_fallback_threshold,
         save_candidates=chosen_save_candidates,
+        seed=chosen_seed,
         runs_dir=project,
         experiment_name=name,
     )

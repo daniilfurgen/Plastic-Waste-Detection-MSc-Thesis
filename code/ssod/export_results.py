@@ -127,6 +127,23 @@ ADD_ONE_IN_RUNS = [
     Run("gt-only", MT / "ablation-architectures-control/yolo26-gt-only", pl_cap=0, soft_weights=False),
 ]
 
+# Seed repeats (`seeds` batch) plus the existing seed-42 runs of the same configurations.
+# Seed-42 runs predate global RNG seeding, so their two copies are independent samples.
+SEED_RUNS: dict[str, list[tuple[str, Path]]] = {
+    "final": [
+        ("42", MT / "ablation-settle/ema-0.9996-cap-2400"),
+        ("42-rerun", MT / "ablation-mechanisms/final-rerun"),
+    ],
+    "simple": [("42", MT / "ablation-add-one-in/plus-slow-ema")],
+    "minimal": [
+        ("42", MT / "ablation-add-one-in/minimal"),
+        ("42-rerun", MT / "ablation-add-one-in/minimal-rerun"),
+    ],
+    "gt-only": [("42", MT / "ablation-architectures-control/yolo26-gt-only")],
+}
+for _config, _runs in SEED_RUNS.items():
+    _runs += [(str(seed), MT / f"ablation-seeds/{_config}-seed{seed}") for seed in (43, 44)]
+
 # Long runs before the ablation (50-100 epochs) that show the original degradation.
 LONG_RUNS = [
     Run("v2-pre-fix", MT / "ssod-v2-100", pl_cap=FULL_POOL, soft_weights=False, ema=0.999,
@@ -339,6 +356,37 @@ def with_deltas(runs: list[Run], reference: str = "final") -> pl.DataFrame:
     )
 
 
+def seed_runs() -> pl.DataFrame:
+    """One row per seed run: mAP50-95 summary plus size and localisation metrics at the best epoch."""
+    rows = []
+    for config, runs in SEED_RUNS.items():
+        for seed, path in runs:
+            df = load(Run(f"{config}-seed{seed}", path))
+            if df is None:
+                continue
+            stats = run_stats(df)
+            best = best_epoch_metrics(df)
+            rows.append({"config": config, "seed": seed,
+                         **{k: stats[k] for k in ("supervised", "best", "best_epoch", "late_mean", "final")},
+                         **{f"best_{k}": best[k] for k in ("map50", "map75", "map_s", "map_m", "map_l")}})
+    return pl.DataFrame(rows)
+
+
+def seed_summary(runs: pl.DataFrame) -> pl.DataFrame:
+    """Mean and sample standard deviation over seeds for each configuration."""
+    if runs.is_empty():
+        return runs
+    metrics = ["best", "late_mean", "final", "best_map75", "best_map_s", "best_map_m"]
+    return (
+        runs.group_by("config", maintain_order=True)
+        .agg(
+            pl.len().alias("n"),
+            *[pl.col(m).mean().round(4).alias(f"{m}_mean") for m in metrics],
+            *[pl.col(m).std().round(4).alias(f"{m}_std") for m in metrics],
+        )
+    )
+
+
 @app.command()
 def main(
     out_dir: Path = typer.Option(Path("paper/exp-results"), "--out", help="Output directory for the CSVs."),
@@ -356,6 +404,9 @@ def main(
     write(curves(MECHANISM_RUNS), out_dir, "ssod_mechanisms_curves.csv")
     write(with_deltas(ADD_ONE_IN_RUNS, reference="minimal"), out_dir, "ssod_add_one_in.csv")
     write(curves(ADD_ONE_IN_RUNS), out_dir, "ssod_add_one_in_curves.csv")
+    seeds = seed_runs()
+    write(seeds, out_dir, "ssod_seed_runs.csv")
+    write(seed_summary(seeds), out_dir, "ssod_seed_summary.csv")
     write(architectures(), out_dir, "ssod_architectures.csv")
     write(label_fractions(), out_dir, "ssod_label_fractions.csv")
 

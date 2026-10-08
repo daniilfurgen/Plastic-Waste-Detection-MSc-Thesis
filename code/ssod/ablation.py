@@ -354,6 +354,36 @@ BATCHES["add-one-in"] = Batch(
     },
 )
 
+# Seed repeats of the configurations the add-one-in conclusions rest on. `simple` keeps only the
+# cap and the slow Teacher: if it matches `final` across seeds, soft weights, size bins,
+# multi-view and the GT tail add complexity without a measurable gain. Seed 42 of each exists.
+SEED_CONFIGS = {
+    "final": FINAL_SSL,
+    "simple": minimal_ssl(ema_decay="0.9996"),
+    "minimal": minimal_ssl(),
+    "gt-only": [
+        "--pl-images-per-epoch", "0",
+        "--ema-decay", "0.9996",
+        "--gt-repeat", str(matched_gt_repeat(GT_TRAIN_IMAGES, pl_images=CAP_2400_PL_IMAGES)),
+    ],
+}
+BATCHES["seeds"] = Batch(
+    project=Path("runs/mean_teacher/ablation-seeds"),
+    runs={
+        f"{name}-seed{seed}": [*args, "--seed", str(seed)]
+        for seed in (43, 44)
+        for name, args in SEED_CONFIGS.items()
+    },
+    references={
+        "final-seed42 (ref)": Path("runs/mean_teacher/ablation-settle/ema-0.9996-cap-2400"),
+        "final-seed42-rerun (ref)": Path("runs/mean_teacher/ablation-mechanisms/final-rerun"),
+        "simple-seed42 (ref)": Path("runs/mean_teacher/ablation-add-one-in/plus-slow-ema"),
+        "minimal-seed42 (ref)": Path("runs/mean_teacher/ablation-add-one-in/minimal"),
+        "minimal-seed42-rerun (ref)": Path("runs/mean_teacher/ablation-add-one-in/minimal-rerun"),
+        "gt-only-seed42 (ref)": Path("runs/mean_teacher/ablation-architectures-control/yolo26-gt-only"),
+    },
+)
+
 # Label fractions on the final configuration (2,400-frame cap), reusing the `fractions` warm-ups.
 BATCHES["fractions-2400"] = fraction_batch(
     ssl_args=["--pl-images-per-epoch", "2400", "--pl-soft-weights", "--ema-decay", "0.9996"],
