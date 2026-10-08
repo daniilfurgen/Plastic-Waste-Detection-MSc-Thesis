@@ -43,6 +43,8 @@ Each batch changes one setting per run relative to a base configuration.
 
 ```bash
 uv run python code/ssod/ablation.py                   # default batch: settle
+uv run python code/ssod/ablation.py --batch mechanisms      # leave-one-out of the PL mechanisms
+uv run python code/ssod/ablation.py --batch add-one-in      # each component alone on a stripped base
 uv run python code/ssod/ablation.py --batch components      # leave-one-out from the tuned YOLO26m
 uv run python code/ssod/ablation.py --batch fractions-2400  # label fractions, final configuration
 uv run python code/ssod/ablation.py --batch fractions # label fractions, 4,800 cap
@@ -336,6 +338,79 @@ against the strongest supervised baseline. Each run removes one component (leave
 
 `no-cap` runs last because it's ~7× slower per epoch. Expect about 4 h in total.
 
+Result after 15 epochs (mAP50-95, baseline 0.448; "late mean" = mean of epochs 8–15):
+
+| Run | Best (epoch) | Last | Late mean | mAP_s, last |
+|---|---|---|---|---|
+| **gt-only** | 0.459 (6) | **0.453** | **0.456** | 0.310 |
+| no-soft-weights | **0.461 (7)** | 0.447 | 0.452 | **0.322** |
+| final | 0.458 (3) | 0.441 | 0.446 | 0.314 |
+| fast-ema | 0.459 (1) | 0.430 | 0.432 | 0.305 |
+| no-cap | 0.444 (1) | 0.410 | 0.413 | 0.281 |
+
+Takeaways:
+- **From the tuned model, pseudo-labels no longer beat the GT-only control.** `final` ends 0.012
+  below it, 0.010 on the late mean. The control gains about the same as from the untuned warm-up
+  (+0.005 at epoch 15). What changed is the pseudo-label contribution: a stronger Teacher's labels
+  carry less the Student doesn't already know, while its errors still feed back.
+- **Pseudo-labels still help small objects and hurt the rest.** At epoch 15, against the control,
+  `mAP_s` is +0.004 (`final`) and +0.012 (`no-soft-weights`), while `mAP_m` is −0.021 and −0.015,
+  and `mAP75` is lower for `final` (0.369 vs. 0.385).
+- **The cap and the slow Teacher still matter.** Without the cap the run collapses (−0.037); EMA
+  0.999 peaks at epoch 1 and drifts to 0.430. The drift signature is unchanged: pseudo-boxes per
+  epoch grow (4.9k → 6.4k for `final`, → 7.9k for `fast-ema`) while val mAP falls.
+- **Hard labels beat soft weights here (+0.006 late mean), the opposite of `pool` (−0.006).** Both
+  gaps are at single-seed noise level, so neither shows whether soft weights help.
+- **The best epochs (0.459–0.461) are within noise of each other** and are picked on the val split
+  they're reported on, so they're optimistic.
+
+Because SSL doesn't beat the control from this start, the batch can't measure what each component
+contributes to an SSL gain. That's measured from the untuned warm-up in `mechanisms`.
+
+### `mechanisms`: what the pseudo-labelling and sampling mechanisms contribute
+
+Output: `runs/mean_teacher/ablation-mechanisms/`. Starts from the shared untuned warm-up (0.430),
+where the final configuration beats its step-matched GT-only control by +0.009 (`architectures`).
+Each run removes one mechanism (leave-one-out). Both existing runs are shown as references.
+
+| Run | Change from `final` | Mechanism tested |
+|---|---|---|
+| `no-size-bins` | `--no-pl-size-bins`: one ground threshold (and object mode for soft weights) over all candidates instead of per COCO size bin | size-stratified ground thresholding |
+| `single-view` | `--no-pl-multi-view`: Teacher infers on the normal view only, no flipped view | multi-view inference |
+| `no-gt-tail` | `--tail-ratio 0`: all GT shuffled with the pseudo-labels; same GT samples per epoch | GT epoch tail |
+| `no-soft-weights` | hard pseudo-labels | soft per-box weights |
+| `final-rerun` | none | run-to-run noise of a single seed |
+| `final (ref)` | `settle/ema-0.9996-cap-2400` | — |
+| `gt-only (ref)` | `architectures-control/yolo26-gt-only` (2,400-matched) | pseudo-labels as a whole |
+
+`final-rerun` repeats the reference with the same seed. How far it lands from `final (ref)` is the
+smallest difference the other runs can be trusted to show. Expect about 2 h in total.
+
+### `add-one-in`: what each component does on its own
+
+Output: `runs/mean_teacher/ablation-add-one-in/`. `mechanisms` removes one component at a time, so
+a component whose job another one already does looks useless there. Soft weights are the example:
+in `pool` (EMA 0.999) they mainly slowed the decline after the peak (best epoch +0.002, last epoch
++0.006), and once the slow EMA and the 2,400 cap removed that decline, they showed nothing.
+
+This batch starts from a stripped Mean Teacher that shares only the 2,400 cap with the final
+configuration, then switches each component back on alone. Same untuned warm-up (0.430).
+
+| Run | Configuration |
+|---|---|
+| `minimal` | cap 2,400; one shared threshold, normal view only, no GT tail, hard labels, EMA 0.999 |
+| `plus-slow-ema` | `minimal` + EMA 0.9996 |
+| `plus-soft-weights` | `minimal` + soft per-box weights |
+| `plus-size-bins` | `minimal` + per-size-bin ground thresholds |
+| `plus-multi-view` | `minimal` + flipped Teacher view |
+| `plus-gt-tail` | `minimal` + 25% GT tail |
+| `minimal-rerun` | `minimal` again: run-to-run noise |
+| `final (ref)`, `final-rerun (ref)`, `gt-only (ref)` | everything on, twice; no pseudo-labels |
+
+The slow EMA counts as a component here, with the original 0.999 as "off". With the fast Teacher
+the stripped run is expected to peak early and then decline, so compare runs mainly on their best
+epoch. Expect about 2.5 h in total.
+
 ## Exporting results for the thesis
 
 ```bash
@@ -351,12 +426,14 @@ mAP50-95 quoted in this README by about ±0.001.
 
 | File | Contents |
 |---|---|
-| `ssod_main_comparison.csv` | Tuned supervised YOLO26m, naive self-training (best round) and Mean Teacher (`components/final`, best epoch): full COCO metrics. |
+| `ssod_main_comparison.csv` | Tuned supervised YOLO26m, its step-matched GT-only fine-tuning (`components/gt-only`, best epoch), naive self-training (best round) and Mean Teacher (`components/final`, best epoch): full COCO metrics. |
 | `ssod_self_training_rounds.csv` | The naive self-training baseline per round. Its method is iterative self-training with hard pseudo-labels, not Noisy Student (no noise, no student growth). |
 | `ssod_mt_settings_summary.csv` | One row per development run (`pool` → `architectures`, YOLO26m): its settings (cap, soft weights, EMA, variant) plus supervised, final, late-mean and best mAP50-95. |
 | `ssod_mt_settings_curves.csv` | The same runs per epoch, in long format, for training-curve plots. |
 | `ssod_mt_long_runs_curves.csv` | The 50–100-epoch runs before the ablation (v2 with the threshold and loss-gain bugs, v3 with the full pool). |
 | `ssod_components.csv`, `ssod_components_curves.csv` | The `components` batch, including the change from `final`. |
+| `ssod_mechanisms.csv`, `ssod_mechanisms_curves.csv` | The `mechanisms` batch with its `final` and `gt-only` references, including the change from `final`. |
+| `ssod_add_one_in.csv`, `ssod_add_one_in_curves.csv` | The `add-one-in` batch with its references, including the change from `minimal`. |
 | `ssod_architectures.csv` | Supervised, GT-only control and each cap for YOLO26m, YOLO11m and YOLO12m. |
 | `ssod_label_fractions.csv` | Supervised, GT-only control and SSL at 10/25/50/100% labels, for both caps. |
 
@@ -372,6 +449,9 @@ supervised starting point.
 | `--gt-yaml` | Ground-truth dataset YAML (used for the label-fraction subsets). |
 | `--model` | Architecture name recorded with the run; the weights themselves come from `--warmup-weights`. |
 | `--pl-soft-weights` (default on) | Weight each pseudo-box's loss by its confidence relative to its size bin: 0 at the bin's threshold, 1 at the bin's typical high score. Small objects are judged against small-object scores. Boxes near the threshold get ~0 weight and are effectively ignored, not treated as background. |
+| `--no-pl-size-bins` | Use one ground threshold (and one object mode) for all pseudo-boxes instead of one per COCO size bin. |
+| `--no-pl-multi-view` | The Teacher pseudo-labels from the normal view only, without the horizontally flipped view. |
+| `--tail-ratio r` | Fraction of GT placed, unmixed, at the end of each epoch (default 0.25; 0 mixes all GT with the pseudo-labels). |
 | `--pl-strong-aug` | Stronger colour jitter, blur and random erasing on pseudo-labelled images only. |
 | `--unsupervised-weight λ` | Multiply the pseudo-label loss by λ. |
 | `--pl-cls-only` | Pseudo-boxes contribute to the classification loss only, with no box regression. Ground-truth boxes are unaffected. |

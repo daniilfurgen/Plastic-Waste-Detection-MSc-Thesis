@@ -295,6 +295,65 @@ BATCHES["components"] = Batch(
     warmup_weights=TUNED_WARMUP_WEIGHTS,
 )
 
+# Leave-one-out contribution of the pseudo-labelling and sampling mechanisms, from the shared
+# untuned warm-up where the final configuration clearly beats its GT-only control.
+BATCHES["mechanisms"] = Batch(
+    project=Path("runs/mean_teacher/ablation-mechanisms"),
+    runs={
+        "no-size-bins": [*FINAL_SSL, "--no-pl-size-bins"],
+        "single-view": [*FINAL_SSL, "--no-pl-multi-view"],
+        "no-gt-tail": [*FINAL_SSL, "--tail-ratio", "0"],
+        "no-soft-weights": ["--pl-images-per-epoch", "2400", "--no-pl-soft-weights", "--ema-decay", "0.9996"],
+        # Identical to the final reference: run-to-run noise of a single seed
+        "final-rerun": FINAL_SSL,
+    },
+    references={
+        "final (ref)": Path("runs/mean_teacher/ablation-settle/ema-0.9996-cap-2400"),
+        "gt-only (ref)": Path("runs/mean_teacher/ablation-architectures-control/yolo26-gt-only"),
+    },
+)
+
+# Add-one-in: a stripped Mean Teacher sharing only the 2,400 cap with the final configuration
+# (one shared threshold, normal view only, no GT tail, hard labels, the original EMA 0.999), plus
+# each component on its own. Separates what a component does alone from what the others cover.
+MINIMAL_SSL = {
+    "--pl-images-per-epoch": "2400",
+    "--pl-size-bins": "--no-pl-size-bins",
+    "--pl-multi-view": "--no-pl-multi-view",
+    "--tail-ratio": "0",
+    "--pl-soft-weights": "--no-pl-soft-weights",
+    "--ema-decay": "0.999",
+}
+
+
+def minimal_ssl(**added: str) -> list[str]:
+    """CLI flags of the stripped configuration with the given components switched back on."""
+    settings = {**MINIMAL_SSL, **{f"--{key.replace('_', '-')}": value for key, value in added.items()}}
+    args: list[str] = []
+    for option, value in settings.items():
+        args += [value] if value.startswith("--") else [option, value]
+    return args
+
+
+BATCHES["add-one-in"] = Batch(
+    project=Path("runs/mean_teacher/ablation-add-one-in"),
+    runs={
+        "minimal": minimal_ssl(),
+        "plus-slow-ema": minimal_ssl(ema_decay="0.9996"),
+        "plus-soft-weights": minimal_ssl(pl_soft_weights="--pl-soft-weights"),
+        "plus-size-bins": minimal_ssl(pl_size_bins="--pl-size-bins"),
+        "plus-multi-view": minimal_ssl(pl_multi_view="--pl-multi-view"),
+        "plus-gt-tail": minimal_ssl(tail_ratio="0.25"),
+        # Identical to minimal: run-to-run noise of a single seed
+        "minimal-rerun": minimal_ssl(),
+    },
+    references={
+        "final (ref)": Path("runs/mean_teacher/ablation-settle/ema-0.9996-cap-2400"),
+        "final-rerun (ref)": Path("runs/mean_teacher/ablation-mechanisms/final-rerun"),
+        "gt-only (ref)": Path("runs/mean_teacher/ablation-architectures-control/yolo26-gt-only"),
+    },
+)
+
 # Label fractions on the final configuration (2,400-frame cap), reusing the `fractions` warm-ups.
 BATCHES["fractions-2400"] = fraction_batch(
     ssl_args=["--pl-images-per-epoch", "2400", "--pl-soft-weights", "--ema-decay", "0.9996"],

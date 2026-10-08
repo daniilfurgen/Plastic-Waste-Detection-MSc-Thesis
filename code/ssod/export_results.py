@@ -102,6 +102,31 @@ COMPONENT_RUNS = [
     Run("gt-only", MT / "ablation-components/gt-only", warmup="tuned", pl_cap=0, soft_weights=False),
 ]
 
+# Leave-one-out of the pseudo-labelling and sampling mechanisms, from the untuned warm-up.
+MECHANISM_RUNS = [
+    Run("final", MT / "ablation-settle/ema-0.9996-cap-2400", pl_cap=2400),
+    Run("final-rerun", MT / "ablation-mechanisms/final-rerun", pl_cap=2400, variant="rerun"),
+    Run("no-size-bins", MT / "ablation-mechanisms/no-size-bins", pl_cap=2400, variant="no_size_bins"),
+    Run("single-view", MT / "ablation-mechanisms/single-view", pl_cap=2400, variant="single_view"),
+    Run("no-gt-tail", MT / "ablation-mechanisms/no-gt-tail", pl_cap=2400, variant="no_gt_tail"),
+    Run("no-soft-weights", MT / "ablation-mechanisms/no-soft-weights", pl_cap=2400, soft_weights=False),
+    Run("gt-only", MT / "ablation-architectures-control/yolo26-gt-only", pl_cap=0, soft_weights=False),
+]
+
+# Add-one-in: a stripped configuration sharing only the 2,400 cap, plus each component alone.
+_MINIMAL = dict(pl_cap=2400, soft_weights=False, ema=0.999)
+ADD_ONE_IN_RUNS = [
+    Run("minimal", MT / "ablation-add-one-in/minimal", **_MINIMAL),
+    Run("minimal-rerun", MT / "ablation-add-one-in/minimal-rerun", **_MINIMAL, variant="rerun"),
+    Run("plus-slow-ema", MT / "ablation-add-one-in/plus-slow-ema", **{**_MINIMAL, "ema": 0.9996}),
+    Run("plus-soft-weights", MT / "ablation-add-one-in/plus-soft-weights", **{**_MINIMAL, "soft_weights": True}),
+    Run("plus-size-bins", MT / "ablation-add-one-in/plus-size-bins", **_MINIMAL, variant="size_bins"),
+    Run("plus-multi-view", MT / "ablation-add-one-in/plus-multi-view", **_MINIMAL, variant="multi_view"),
+    Run("plus-gt-tail", MT / "ablation-add-one-in/plus-gt-tail", **_MINIMAL, variant="gt_tail"),
+    Run("final", MT / "ablation-settle/ema-0.9996-cap-2400", pl_cap=2400),
+    Run("gt-only", MT / "ablation-architectures-control/yolo26-gt-only", pl_cap=0, soft_weights=False),
+]
+
 # Long runs before the ablation (50-100 epochs) that show the original degradation.
 LONG_RUNS = [
     Run("v2-pre-fix", MT / "ssod-v2-100", pl_cap=FULL_POOL, soft_weights=False, ema=0.999,
@@ -198,12 +223,18 @@ def best_epoch_metrics(df: pl.DataFrame) -> dict[str, object]:
 
 
 def main_comparison() -> pl.DataFrame:
-    """Supervised YOLO26m vs. naive self-training vs. Mean Teacher, best results (COCO metrics)."""
+    """
+    Supervised YOLO26m vs. GT-only fine-tuning vs. naive self-training vs. Mean Teacher, best
+    results (COCO metrics). The fine-tuning row is the step-matched control of the Mean Teacher run.
+    """
     rows: list[dict[str, object]] = []
     final = load(COMPONENT_RUNS[0])
+    control = load(next(run for run in COMPONENT_RUNS if run.run_id == "gt-only"))
     if final is not None:
         base = final.filter(pl.col("epoch") == 0).row(0, named=True)
         rows.append({"method": "supervised", "selection": "trained model", "epoch": 0, **metric_row(base, METRICS)})
+    if control is not None:
+        rows.append({"method": "gt_fine_tuning", "selection": "best epoch", **best_epoch_metrics(control)})
 
     if NAIVE_SELF_TRAINING.is_file():
         rounds = yaml.safe_load(NAIVE_SELF_TRAINING.read_text(encoding="utf-8"))
@@ -296,11 +327,12 @@ def label_fractions() -> pl.DataFrame:
     return pl.DataFrame(rows)
 
 
-def components() -> pl.DataFrame:
-    df = summary(COMPONENT_RUNS)
-    if df.is_empty() or "final" not in df["run"].to_list():
+def with_deltas(runs: list[Run], reference: str = "final") -> pl.DataFrame:
+    """Summary of an ablation batch with each run's change from the `reference` run."""
+    df = summary(runs)
+    if df.is_empty() or reference not in df["run"].to_list():
         return df
-    ref = df.filter(pl.col("run") == "final").row(0, named=True)
+    ref = df.filter(pl.col("run") == reference).row(0, named=True)
     return df.with_columns(
         delta_final=(pl.col("final") - ref["final"]).round(4),
         delta_late_mean=(pl.col("late_mean") - ref["late_mean"]).round(4),
@@ -318,8 +350,12 @@ def main(
     write(summary(DEVELOPMENT_RUNS), out_dir, "ssod_mt_settings_summary.csv")
     write(curves(DEVELOPMENT_RUNS), out_dir, "ssod_mt_settings_curves.csv")
     write(curves(LONG_RUNS), out_dir, "ssod_mt_long_runs_curves.csv")
-    write(components(), out_dir, "ssod_components.csv")
+    write(with_deltas(COMPONENT_RUNS), out_dir, "ssod_components.csv")
     write(curves(COMPONENT_RUNS), out_dir, "ssod_components_curves.csv")
+    write(with_deltas(MECHANISM_RUNS), out_dir, "ssod_mechanisms.csv")
+    write(curves(MECHANISM_RUNS), out_dir, "ssod_mechanisms_curves.csv")
+    write(with_deltas(ADD_ONE_IN_RUNS, reference="minimal"), out_dir, "ssod_add_one_in.csv")
+    write(curves(ADD_ONE_IN_RUNS), out_dir, "ssod_add_one_in_curves.csv")
     write(architectures(), out_dir, "ssod_architectures.csv")
     write(label_fractions(), out_dir, "ssod_label_fractions.csv")
 
