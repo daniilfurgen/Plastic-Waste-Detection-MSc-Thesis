@@ -273,6 +273,8 @@ class MeanTeacherConfig:
     pl_images_per_epoch: int | None = 2400
     pl_soft_weights: bool = True  # threshold-aware per-box PL loss weights
     pl_cls_only: bool = False  # pseudo boxes train classification only (no box/DFL regression)
+    pl_size_bins: bool = True  # ground threshold per COCO size bin (False: one for all boxes)
+    pl_multi_view: bool = True  # Teacher inference on normal + flipped views (False: normal only)
 
     # Pseudo-labeling parameters
     pseudo_conf: float = 0.001
@@ -879,7 +881,7 @@ class MeanTeacherTrainer:
                             setattr(self.config, k, float(v))
                         elif k in ("ssl_epochs", "warmup_epochs", "batch_size", "imgsz", "workers", "unsupervised_warmup_epochs", "gt_repeat"):
                             setattr(self.config, k, int(v))
-                        elif k in ("pl_strong_aug", "pl_soft_weights", "pl_cls_only"):
+                        elif k in ("pl_strong_aug", "pl_soft_weights", "pl_cls_only", "pl_size_bins", "pl_multi_view"):
                             setattr(self.config, k, bool(v))
                         elif k == "pl_images_per_epoch":
                             setattr(self.config, k, int(v) if v is not None else None)
@@ -1193,6 +1195,8 @@ class MeanTeacherTrainer:
             iou_threshold=self.config.pseudo_iou,
             fallback_threshold=self.config.pseudo_fallback_threshold,
             soft_weights=self.config.pl_soft_weights,
+            size_bins=self.config.pl_size_bins,
+            multi_view=self.config.pl_multi_view,
             device=self.device,
             logger=self.logger,
         )
@@ -1738,6 +1742,16 @@ def main(
         "--pl-soft-weights/--no-pl-soft-weights",
         help="Weight each pseudo box's loss by its score between its size bin's threshold and object mode.",
     ),
+    pl_size_bins: bool = typer.Option(
+        True,
+        "--pl-size-bins/--no-pl-size-bins",
+        help="Pseudo-label ground threshold per COCO size bin (off: one threshold for all boxes).",
+    ),
+    pl_multi_view: bool = typer.Option(
+        True,
+        "--pl-multi-view/--no-pl-multi-view",
+        help="Teacher pseudo-labels from the normal and flipped views (off: normal view only).",
+    ),
     max_pseudo_images: Optional[int] = typer.Option(
         None, "--max-pseudo-images", help="Max unlabeled images for pseudo-labeling."
     ),
@@ -1841,6 +1855,8 @@ def main(
             chosen_pl_images_per_epoch = None
     chosen_pl_cls_only = bool(pick_val("pl_cls_only", pl_cls_only, "pl_cls_only", False))
     chosen_pl_soft_weights = bool(pick_val("pl_soft_weights", pl_soft_weights, "pl_soft_weights", True))
+    chosen_pl_size_bins = bool(pick_val("pl_size_bins", pl_size_bins, "pl_size_bins", True))
+    chosen_pl_multi_view = bool(pick_val("pl_multi_view", pl_multi_view, "pl_multi_view", True))
     chosen_max_pseudo_images = pick_val("max_pseudo_images", max_pseudo_images, "max_pseudo_images", None)
     if chosen_max_pseudo_images is not None:
         chosen_max_pseudo_images = int(chosen_max_pseudo_images)
@@ -1873,6 +1889,8 @@ def main(
         pl_images_per_epoch=chosen_pl_images_per_epoch,
         pl_soft_weights=chosen_pl_soft_weights,
         pl_cls_only=chosen_pl_cls_only,
+        pl_size_bins=chosen_pl_size_bins,
+        pl_multi_view=chosen_pl_multi_view,
         max_pseudo_images=chosen_max_pseudo_images,
         pseudo_fallback_threshold=chosen_pseudo_fallback_threshold,
         save_candidates=chosen_save_candidates,

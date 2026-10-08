@@ -5,10 +5,17 @@ Unit tests for pseudo-label score thresholding, per-box weights and image sampli
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 import sys
+import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
+import cv2
 import numpy as np
+import torch
+from ultralytics.engine.results import Boxes
 
 # Ensure code directory is on sys.path
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -17,6 +24,7 @@ if str(CODE_DIR) not in sys.path:
     sys.path.insert(0, str(CODE_DIR))
 
 from ssod.pseudo_labeling import (  # noqa: E402
+    PseudoLabelGenerator,
     box_weights,
     ground_modes,
     ground_threshold,
@@ -141,3 +149,64 @@ class TestSampleImageFiles(unittest.TestCase):
     def test_no_sampling_returns_all(self):
         self.assertEqual(sample_image_files(self.files, None, seed=0), self.files)
         self.assertEqual(sample_image_files(self.files, 5000, seed=0), self.files)
+
+
+class _FakeTeacher:
+    """One small (score 0.9) and one large (score 0.5) box per image, both flip-symmetric; counts calls."""
+
+    def __init__(self):
+        self.predict_calls = 0
+
+    def predict(self, images, **kwargs):
+        self.predict_calls += 1
+        return [
+            SimpleNamespace(
+                orig_shape=image.shape[:2],
+                boxes=Boxes(
+                    torch.tensor([[123.0, 10.0, 133.0, 20.0, 0.9, 0.0], [28.0, 28.0, 228.0, 228.0, 0.5, 0.0]]),
+                    image.shape[:2],
+                ),
+            )
+            for image in images
+        ]
+
+
+class TestGeneratorSwitches(unittest.TestCase):
+    """Test the size-bin thresholding and multi-view switches of PseudoLabelGenerator."""
+
+    def setUp(self):
+        self.test_dir = Path(tempfile.mkdtemp())
+        self.images = self.test_dir / "images"
+        self.images.mkdir()
+        for i in range(3):
+            cv2.imwrite(str(self.images / f"frame_{i}.png"), np.zeros((256, 256, 3), np.uint8))
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def _generate(self, modes, **switches):
+        teacher = _FakeTeacher()
+        generator = PseudoLabelGenerator(teacher, batch_size=8, half=False, workers=1, **switches)
+        with patch("ssod.pseudo_labeling.ground_modes", side_effect=modes) as mocked:
+            out = generator.generate(self.images, self.test_dir / "labels")
+        return teacher, mocked, out
+
+    def test_per_bin_thresholds_by_default(self):
+        _, mocked, out = self._generate([(0.3, 0.8), (0.3, 0.8), (0.3, 0.8)])
+        self.assertEqual(mocked.call_count, 3)
+        self.assertEqual(len(out["filtered_df"]), 6)
+
+    def test_shared_threshold_without_size_bins(self):
+        _, mocked, out = self._generate([(0.7, 0.9)], size_bins=False)
+        self.assertEqual(mocked.call_count, 1)
+        self.assertEqual(len(mocked.call_args.args[0]), 6)  # every candidate, all bins
+        self.assertEqual(set(out["thresholds"].values()), {0.7})
+        # the large boxes (score 0.5) fall below the shared threshold
+        self.assertEqual(out["filtered_df"]["size_bin"].unique().to_list(), ["small"])
+
+    def test_single_view_skips_flip_inference(self):
+        multi, _, _ = self._generate([(0.3, 0.8)] * 3)
+        single, _, out = self._generate([(0.3, 0.8)] * 3, multi_view=False)
+        self.assertEqual(multi.predict_calls, 2)
+        self.assertEqual(single.predict_calls, 1)
+        self.assertEqual(len(out["filtered_df"]), 6)
