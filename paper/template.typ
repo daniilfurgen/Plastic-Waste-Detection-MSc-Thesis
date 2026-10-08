@@ -70,9 +70,11 @@
   // Налаштування підписів
   show figure.where(kind: table): set figure.caption(position: top)
   show figure.where(kind: table): set align(right)
-  show figure: set block(above: line-spacing * 3, below: line-spacing * 3)
-  // show figure.caption.where(kind: table): set align(right)
   set figure.caption(separator: [. ])
+
+  // Налаштування відступів рисунтів
+  show figure: body => block(above: line-spacing * 3, below: line-spacing * 3, body)
+  // Вирінвнювання в таблицях
   show table.cell: set align(horizon)
 
   // Налаштування веб-посилань
