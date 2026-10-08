@@ -70,8 +70,10 @@
   // Налаштування підписів
   show figure.where(kind: table): set figure.caption(position: top)
   show figure.where(kind: table): set align(right)
+  show figure: set block(above: line-spacing * 3, below: line-spacing * 3)
   // show figure.caption.where(kind: table): set align(right)
   set figure.caption(separator: [. ])
+  show table.cell: set align(horizon)
 
   // Налаштування веб-посилань
   // show link: set text(fill: navy)
@@ -94,10 +96,13 @@
   set par(leading: line-spacing, spacing: line-spacing)
   set block(spacing: line-spacing)
   show heading: set block(spacing: line-spacing)
-  show heading.where(level: 1): set block(below: 2em)
+  show heading: set block(above: line-spacing * 2, below: line-spacing * 2)
 
   // Особливі терміни та симовли
   show "F1": $F_1$
+  show "mAP_S": $"mAP"_"S"$
+  show "mAP_M": $"mAP"_"M"$
+  show "mAP_L": $"mAP"_"L"$
   show "XX": highlight([XX (Замінити!)])
 
   body

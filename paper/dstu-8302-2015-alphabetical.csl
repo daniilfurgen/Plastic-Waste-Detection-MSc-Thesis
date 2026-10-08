@@ -1,0 +1,169 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<style xmlns="http://purl.org/net/xbiblio/csl" class="in-text" version="1.0" default-locale="uk-UA">
+  <info>
+    <title>ДСТУ 8302:2015 (Typst - Custom Modern, Alphabetical)</title>
+    <id>http://www.zotero.org/styles/dstu-8302-2015-typst-custom-alphabetical</id>
+    <link href="http://www.zotero.org/styles/dstu-8302-2015-typst-custom-alphabetical" rel="self"/>
+    <category citation-format="numeric"/>
+    <updated>2026-03-20T00:00:00+00:00</updated>
+  </info>
+
+  <locale xml:lang="uk">
+    <terms>
+      <term name="et-al">та ін.</term>
+      <term name="page" form="short">С.</term>
+      <term name="accessed">дата звернення</term>
+    </terms>
+  </locale>
+  <locale xml:lang="en">
+    <terms>
+      <term name="et-al">et al.</term>
+      <term name="page" form="short">P.</term>
+      <term name="accessed">accessed</term>
+    </terms>
+  </locale>
+
+  <macro name="title-and-type">
+    <group delimiter=" ">
+      <text variable="title"/>
+      <choose>
+        <if type="webpage post post-weblog software dataset" match="any">
+          <text value="[Електронний ресурс]"/>
+        </if>
+      </choose>
+    </group>
+  </macro>
+
+  <macro name="author-inline">
+    <names variable="author">
+      <name initialize-with=". " delimiter=", " et-al-min="5" et-al-use-first="1"/>
+      <et-al/>
+    </names>
+  </macro>
+
+  <macro name="container-info">
+    <group delimiter=" ">
+      <text value="//"/>
+      <choose>
+        <if type="article-journal article-magazine article-newspaper" match="any">
+          <group delimiter=", ">
+            <text variable="container-title" font-style="italic"/>
+            <group delimiter=" ">
+              <text term="volume" form="short" text-case="capitalize-first"/>
+              <text variable="volume"/>
+            </group>
+            <group delimiter=" ">
+              <text term="issue" form="short" text-case="capitalize-first"/>
+              <text variable="issue"/>
+            </group>
+            <date variable="issued">
+              <date-part name="year"/>
+            </date>
+          </group>
+        </if>
+        <else-if type="paper-conference chapter" match="any">
+          <group delimiter=", ">
+            <text variable="container-title"/>
+            <text variable="event-place"/>
+            <text variable="publisher-place"/>
+            <date variable="issued">
+              <date-part name="day" suffix=" "/>
+              <date-part name="month" form="short" suffix=" "/>
+              <date-part name="year"/>
+            </date>
+          </group>
+        </else-if>
+        <else-if type="webpage post post-weblog dataset software" match="any">
+          <group delimiter=", ">
+            <text variable="container-title"/> 
+            <text variable="publisher"/>
+            <date variable="issued">
+              <date-part name="year"/>
+            </date>
+          </group>
+        </else-if>
+        <else>
+          <group delimiter=", ">
+            <group delimiter=" : ">
+              <text variable="publisher-place"/>
+              <text variable="publisher"/>
+            </group>
+            <date variable="issued">
+              <date-part name="year"/>
+            </date>
+          </group>
+        </else>
+      </choose>
+    </group>
+  </macro>
+
+  <macro name="access">
+    <choose>
+      <if variable="DOI">
+        <text variable="DOI" prefix="DOI: "/>
+      </if>
+      <else-if variable="URL">
+        <group delimiter=" ">
+          <text value="URL:"/>
+          <text variable="URL"/>
+          <group prefix="(" suffix=")">
+            <text term="accessed" suffix=": "/>
+            <date variable="accessed">
+              <date-part name="day" form="numeric-leading-zeros" suffix="."/>
+              <date-part name="month" form="numeric-leading-zeros" suffix="."/>
+              <date-part name="year"/>
+            </date>
+          </group>
+        </group>
+      </else-if>
+    </choose>
+  </macro>
+
+  <citation collapse="citation-number">
+    <sort>
+      <key variable="citation-number"/>
+    </sort>
+    <layout prefix="[" suffix="]" delimiter="; ">
+      <text variable="citation-number"/>
+      <group prefix=", ">
+        <label variable="locator" form="short" suffix=" "/>
+        <text variable="locator"/>
+      </group>
+    </layout>
+  </citation>
+
+  <bibliography entry-spacing="1" second-field-align="flush">
+    <sort>
+      <key variable="title"/>
+      <key variable="author"/>
+      <key variable="issued"/>
+    </sort>
+    <layout suffix=".">
+      <text variable="citation-number" suffix=". "/>
+      
+      <group delimiter=". ">
+        <group delimiter=" / ">
+          <text macro="title-and-type"/>
+          <text macro="author-inline"/>
+        </group>
+        
+        <text macro="container-info"/>
+        
+        <choose>
+          <if type="paper-conference chapter" match="any">
+            <text variable="publisher"/>
+          </if>
+        </choose>
+        
+        <group delimiter=" ">
+          <label variable="page" form="short" text-case="capitalize-first"/>
+          <text variable="page"/>
+        </group>
+        
+        <text variable="ISBN" prefix="ISBN "/>
+        <text macro="access"/>
+        
+      </group>
+    </layout>
+  </bibliography>
+</style>
