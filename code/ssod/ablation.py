@@ -396,6 +396,13 @@ BATCHES["fractions-2400"] = fraction_batch(
     },
 )
 
+# Every batch above predates input-scale size bins and binned pseudo-labels in original image
+# pixels; pin that so they stay reproducible. Batches added below use the input-scale default.
+LEGACY_SIZE_BINS = ["--no-pl-input-scale-bins"]
+for _batch in BATCHES.values():
+    for _run, _args in _batch.runs.items():
+        _batch.runs[_run] = [*_args, *LEGACY_SIZE_BINS]
+
 SUMMARY_FIELDS = [
     "run",
     "epochs_done",

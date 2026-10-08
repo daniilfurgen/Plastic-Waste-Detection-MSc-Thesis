@@ -25,9 +25,11 @@ if str(CODE_DIR) not in sys.path:
 
 from ssod.pseudo_labeling import (  # noqa: E402
     PseudoLabelGenerator,
+    assign_size_bin,
     box_weights,
     ground_modes,
     ground_threshold,
+    input_scale,
     sample_image_files,
 )
 
@@ -210,3 +212,26 @@ class TestGeneratorSwitches(unittest.TestCase):
         self.assertEqual(multi.predict_calls, 2)
         self.assertEqual(single.predict_calls, 1)
         self.assertEqual(len(out["filtered_df"]), 6)
+
+    def test_input_scale_bins_follow_network_input(self):
+        # 256 px images at imgsz=64 are shrunk 4x: the 200 px box (large in original pixels)
+        # becomes 50 px at the input, i.e. medium
+        _, _, scaled = self._generate([(0.3, 0.8)] * 3, imgsz=64)
+        _, _, original = self._generate([(0.3, 0.8)] * 3, imgsz=64, input_scale_bins=False)
+        self.assertEqual(sorted(scaled["filtered_df"]["size_bin"].unique().to_list()), ["medium", "small"])
+        self.assertEqual(sorted(original["filtered_df"]["size_bin"].unique().to_list()), ["large", "small"])
+
+
+class TestSizeBins(unittest.TestCase):
+    """Test COCO size-bin assignment at the network input scale."""
+
+    def test_input_scale_uses_longer_side(self):
+        self.assertAlmostEqual(input_scale(4000, 3000, 640), 0.16)
+        self.assertAlmostEqual(input_scale(1280, 720, 640), 0.5)
+
+    def test_scale_moves_box_between_bins(self):
+        # 100x100 px box on a 4000x3000 image: large in original pixels, 16x16 px at the input
+        self.assertEqual(assign_size_bin(100, 100), "large")
+        self.assertEqual(assign_size_bin(100, 100, input_scale(4000, 3000, 640)), "small")
+        self.assertEqual(assign_size_bin(40, 40, 1.0), "medium")
+

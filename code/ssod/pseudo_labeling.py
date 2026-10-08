@@ -119,8 +119,18 @@ def _nms_aggregate(
     return [detections[index] for index in keep.tolist()]
 
 
-def assign_size_bin(w: float, h: float) -> str:
-    area = w * h
+def input_scale(img_width: float, img_height: float, imgsz: int) -> float:
+    """Letterbox resize factor from an image to the network input (longer side -> imgsz)."""
+    return imgsz / max(img_width, img_height)
+
+
+def assign_size_bin(w: float, h: float, scale: float = 1.0) -> str:
+    """
+    COCO size bin of a box. COCO's bin limits were set on images whose longer side is about 640 px,
+    so `scale` maps the box to the network input (see `input_scale`) before binning; with
+    scale=1 the bin is taken in original image pixels.
+    """
+    area = w * h * scale**2
     for name, (lo, hi) in SIZE_BINS.items():
         if lo <= area < hi:
             return name
@@ -350,6 +360,8 @@ class PseudoLabelGenerator:
         soft_weights: bool = False,
         size_bins: bool = True,
         multi_view: bool = True,
+        imgsz: int = 640,
+        input_scale_bins: bool = True,
         device: str | torch.device | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -367,6 +379,9 @@ class PseudoLabelGenerator:
         self.soft_weights = soft_weights
         self.size_bins = size_bins
         self.multi_view = multi_view
+        self.imgsz = imgsz
+        # Size bins at the network input scale (False: in original image pixels)
+        self.input_scale_bins = input_scale_bins
         self.device = device
         self.logger = logger or get_logger()
         self._cached_images_dir: Path | None = None
@@ -389,7 +404,9 @@ class PseudoLabelGenerator:
            only if not multi_view).
         3. Collect candidates into Polars DataFrame.
         4. Optionally export raw candidates to Parquet.
-        5. Compute the ground threshold per COCO size bin (or one for all boxes if not size_bins).
+        5. Compute the ground threshold per COCO size bin, with box areas taken at the network
+           input scale unless input_scale_bins is off (or one threshold for all boxes if not
+           size_bins).
         6. Filter candidates by threshold, weight them (if soft_weights) and save YOLO .txt
            labels (omitting empty files; the weight is written as a 6th column).
         """
@@ -496,6 +513,7 @@ class PseudoLabelGenerator:
 
                     predict_kwargs: dict[str, Any] = {
                         "batch": len(v_paths),
+                        "imgsz": self.imgsz,
                         "half": self.half,
                         "conf": self.conf,
                         "verbose": False,
@@ -513,6 +531,11 @@ class PseudoLabelGenerator:
                     for j, img_path in enumerate(v_paths):
                         im = v_imgs[j]
                         img_height, img_width = im.shape[:2]
+                        bin_scale = (
+                            input_scale(img_width, img_height, self.imgsz)
+                            if self.input_scale_bins
+                            else 1.0
+                        )
 
                         rel_path = img_path.relative_to(resolved_img_dir)
                         target_label = resolved_lbl_dir / rel_path.with_suffix(".txt")
@@ -525,7 +548,7 @@ class PseudoLabelGenerator:
                         )
 
                         for cand in candidates:
-                            sb = assign_size_bin(cand["w"], cand["h"])
+                            sb = assign_size_bin(cand["w"], cand["h"], bin_scale)
                             records["image_stem"].append(img_path.stem)
                             records["label_path"].append(str(target_label))
                             records["img_width"].append(img_width)
@@ -736,6 +759,8 @@ def generate_pseudo_labels(
     soft_weights: bool = False,
     size_bins: bool = True,
     multi_view: bool = True,
+    imgsz: int = 640,
+    input_scale_bins: bool = True,
     device: str | torch.device | None = None,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
@@ -751,6 +776,8 @@ def generate_pseudo_labels(
         soft_weights=soft_weights,
         size_bins=size_bins,
         multi_view=multi_view,
+        imgsz=imgsz,
+        input_scale_bins=input_scale_bins,
         device=device,
         logger=logger,
     )
@@ -859,6 +886,12 @@ def main(
         "--multi-view/--no-multi-view",
         help="Aggregate the normal and horizontally flipped views (off: normal view only).",
     ),
+    imgsz: int = typer.Option(640, "--imgsz", help="Teacher inference image size."),
+    input_scale_bins: bool = typer.Option(
+        True,
+        "--input-scale-bins/--no-input-scale-bins",
+        help="Take COCO size bins at the network input scale (off: in original image pixels).",
+    ),
     device: Optional[str] = typer.Option(
         None,
         "--device",
@@ -882,6 +915,8 @@ def main(
         soft_weights=soft_weights,
         size_bins=size_bins,
         multi_view=multi_view,
+        imgsz=imgsz,
+        input_scale_bins=input_scale_bins,
         device=device,
     )
 

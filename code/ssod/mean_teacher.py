@@ -146,10 +146,6 @@ def discover_coco_gt_path(gt_data_yaml: Path | str | None) -> Path | None:
     candidates: list[Path] = []
     if gt_data_yaml is not None:
         yaml_path = Path(gt_data_yaml).resolve()
-        candidates.extend([
-            yaml_path.parent / "flow_img" / "val" / "annotations.json",
-            yaml_path.parent / "val" / "annotations.json",
-        ])
         if yaml_path.is_file():
             try:
                 import yaml
@@ -163,6 +159,10 @@ def discover_coco_gt_path(gt_data_yaml: Path | str | None) -> Path | None:
                     ])
             except Exception:
                 pass
+        candidates.extend([
+            yaml_path.parent / "val" / "annotations.json",
+            yaml_path.parent / "flow_img" / "val" / "annotations.json",
+        ])
     candidates.append(Path("data/flow_img/val/annotations.json").resolve())
 
     for cand in candidates:
@@ -274,6 +274,7 @@ class MeanTeacherConfig:
     pl_soft_weights: bool = True  # threshold-aware per-box PL loss weights
     pl_cls_only: bool = False  # pseudo boxes train classification only (no box/DFL regression)
     pl_size_bins: bool = True  # ground threshold per COCO size bin (False: one for all boxes)
+    pl_input_scale_bins: bool = True  # size bins at the network input scale (False: original pixels)
     pl_multi_view: bool = True  # Teacher inference on normal + flipped views (False: normal only)
 
     # Pseudo-labeling parameters
@@ -881,7 +882,7 @@ class MeanTeacherTrainer:
                             setattr(self.config, k, float(v))
                         elif k in ("ssl_epochs", "warmup_epochs", "batch_size", "imgsz", "workers", "unsupervised_warmup_epochs", "gt_repeat", "seed"):
                             setattr(self.config, k, int(v))
-                        elif k in ("pl_strong_aug", "pl_soft_weights", "pl_cls_only", "pl_size_bins", "pl_multi_view"):
+                        elif k in ("pl_strong_aug", "pl_soft_weights", "pl_cls_only", "pl_size_bins", "pl_multi_view", "pl_input_scale_bins"):
                             setattr(self.config, k, bool(v))
                         elif k == "pl_images_per_epoch":
                             setattr(self.config, k, int(v) if v is not None else None)
@@ -1202,6 +1203,8 @@ class MeanTeacherTrainer:
             soft_weights=self.config.pl_soft_weights,
             size_bins=self.config.pl_size_bins,
             multi_view=self.config.pl_multi_view,
+            imgsz=self.config.imgsz,
+            input_scale_bins=self.config.pl_input_scale_bins,
             device=self.device,
             logger=self.logger,
         )
@@ -1757,6 +1760,11 @@ def main(
         "--pl-multi-view/--no-pl-multi-view",
         help="Teacher pseudo-labels from the normal and flipped views (off: normal view only).",
     ),
+    pl_input_scale_bins: bool = typer.Option(
+        True,
+        "--pl-input-scale-bins/--no-pl-input-scale-bins",
+        help="Take pseudo-label COCO size bins at the network input scale (off: original image pixels).",
+    ),
     max_pseudo_images: Optional[int] = typer.Option(
         None, "--max-pseudo-images", help="Max unlabeled images for pseudo-labeling."
     ),
@@ -1867,6 +1875,13 @@ def main(
     chosen_pl_soft_weights = bool(pick_val("pl_soft_weights", pl_soft_weights, "pl_soft_weights", True))
     chosen_pl_size_bins = bool(pick_val("pl_size_bins", pl_size_bins, "pl_size_bins", True))
     chosen_pl_multi_view = bool(pick_val("pl_multi_view", pl_multi_view, "pl_multi_view", True))
+    # Runs saved before input-scale bins existed binned in original pixels; keep that on resume
+    if saved_cfg and "pl_input_scale_bins" not in saved_cfg and not was_specified("pl_input_scale_bins"):
+        chosen_pl_input_scale_bins = False
+    else:
+        chosen_pl_input_scale_bins = bool(
+            pick_val("pl_input_scale_bins", pl_input_scale_bins, "pl_input_scale_bins", True)
+        )
     chosen_max_pseudo_images = pick_val("max_pseudo_images", max_pseudo_images, "max_pseudo_images", None)
     if chosen_max_pseudo_images is not None:
         chosen_max_pseudo_images = int(chosen_max_pseudo_images)
@@ -1902,6 +1917,7 @@ def main(
         pl_cls_only=chosen_pl_cls_only,
         pl_size_bins=chosen_pl_size_bins,
         pl_multi_view=chosen_pl_multi_view,
+        pl_input_scale_bins=chosen_pl_input_scale_bins,
         max_pseudo_images=chosen_max_pseudo_images,
         pseudo_fallback_threshold=chosen_pseudo_fallback_threshold,
         save_candidates=chosen_save_candidates,

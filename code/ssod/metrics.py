@@ -49,8 +49,13 @@ def fix_prediction_ids(
         Path(img["file_name"]).stem: img["id"] for img in coco_gt.get("images", [])
     }
 
+    # Ultralytics writes 0-based class indices as category_id for non-COCO datasets; keep them
+    # when the GT uses the same ids (multi-class), otherwise fall back to the default category
+    gt_category_ids = {cat["id"] for cat in coco_gt.get("categories", [])}
+
     for pred in predictions:
-        pred["category_id"] = default_category_id
+        if pred.get("category_id") not in gt_category_ids:
+            pred["category_id"] = default_category_id
         file_name = pred.get("file_name")
         if file_name and file_name in img_name_to_id:
             pred["image_id"] = img_name_to_id[file_name]

@@ -28,6 +28,7 @@ from ssod.mean_teacher import (  # noqa: E402
     MeanTeacherConfig,
     compute_batch_loss,
     configure_student_criterion,
+    discover_coco_gt_path,
     split_batch,
     update_teacher_ema,
 )
@@ -281,6 +282,58 @@ class TestCOCOMetrics(unittest.TestCase):
         self.assertIn("peak_f1", metrics)
         self.assertGreater(metrics["mAP_50"], 0.8)
         self.assertGreater(metrics["peak_f1"], 0.8)
+
+
+class TestCOCOMultiClass(unittest.TestCase):
+    """Multi-class predictions keep their class ids when the GT uses the same ids."""
+
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp())
+        self.gt_path = self.temp_dir / "annotations.json"
+        self.pred_path = self.temp_dir / "predictions.json"
+        gt = {
+            "images": [{"id": 1, "file_name": "a.jpg", "width": 640, "height": 640}],
+            "categories": [{"id": 0, "name": "glass"}, {"id": 1, "name": "metal"}],
+            "annotations": [
+                {"id": 1, "image_id": 1, "category_id": 0, "bbox": [10, 10, 50, 50], "area": 2500, "iscrowd": 0},
+                {"id": 2, "image_id": 1, "category_id": 1, "bbox": [200, 200, 60, 60], "area": 3600, "iscrowd": 0},
+            ],
+        }
+        self.gt_path.write_text(json.dumps(gt))
+        preds = [
+            {"image_id": "a", "file_name": "a.jpg", "category_id": 0, "bbox": [10, 10, 50, 50], "score": 0.9},
+            {"image_id": "a", "file_name": "a.jpg", "category_id": 1, "bbox": [200, 200, 60, 60], "score": 0.9},
+            {"image_id": "a", "file_name": "a.jpg", "category_id": 7, "bbox": [400, 400, 20, 20], "score": 0.5},
+        ]
+        self.pred_path.write_text(json.dumps(preds))
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_class_ids_preserved(self):
+        fixed = fix_prediction_ids(self.pred_path, self.gt_path, default_category_id=0)
+        self.assertEqual([p["category_id"] for p in fixed], [0, 1, 0])  # unknown id -> default
+        self.assertTrue(all(p["image_id"] == 1 for p in fixed))
+
+    def test_multiclass_map(self):
+        metrics = evaluate_coco(self.gt_path, self.pred_path, default_category_id=0)
+        self.assertGreater(metrics["mAP_50"], 0.99)
+
+
+class TestCOCOGroundTruthDiscovery(unittest.TestCase):
+    """The dataset's own val annotations win over the FloW fallback next to its YAML."""
+
+    def test_prefers_dataset_annotations(self):
+        root = Path(tempfile.mkdtemp())
+        try:
+            for ds in ("flow_img", "ucwd"):
+                (root / ds / "val").mkdir(parents=True)
+                (root / ds / "val" / "annotations.json").write_text("{}")
+            yaml_path = root / "ucwd.yaml"
+            yaml_path.write_text(f"path: {root / 'ucwd'}\ntrain: train/images\nval: val/images\n")
+            self.assertEqual(discover_coco_gt_path(yaml_path), root / "ucwd" / "val" / "annotations.json")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 class TestMeanTeacherIntegration(unittest.TestCase):

@@ -58,7 +58,7 @@ $$
 ### Pseudo-label generation
 
 - **2-view inference.** The Teacher predicts on the original image and on its horizontal flip, with a very low candidate confidence ($0.001$). The flipped predictions are mapped back, and both views are merged with class-wise NMS (IoU $0.5$).
-- **Size bins.** Candidates are grouped by COCO area bins: small $< 32^2$, medium $32^2$–$96^2$, large $\ge 96^2$ px².
+- **Size bins.** Candidates are grouped by COCO area bins: small $< 32^2$, medium $32^2$–$96^2$, large $\ge 96^2$ px². COCO set these limits on images whose longer side is about 640 px, so each box area is first scaled to the network input, $A_{in} = w h \cdot (s / \max(W, H))^2$ with input size $s$ (`imgsz`). Bins then mean the same thing on any image resolution (`--no-pl-input-scale-bins` bins in original pixels, as all ablation batches so far did).
 - **Ground threshold per bin.** For each bin, build a histogram of candidate scores over the whole score range (21 bins, moving-average smoothing of width 3). The two highest peaks are the _noise mode_ (near the confidence floor) and the _object mode_. The threshold $\tau_b$ is the lowest point (valley) between them, and $m_b$ is the object mode. If there is no valley, $\tau_b = 0.4$ and $m_b$ is the 90th percentile of the scores above it.
 - **Soft per-box weights** (on by default). A kept box with score $s \ge \tau_b$ gets
 

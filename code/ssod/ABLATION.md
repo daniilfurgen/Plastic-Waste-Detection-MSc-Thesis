@@ -18,9 +18,11 @@ Based on the batches below, the trainer's defaults are now:
 | `--pl-images-per-epoch` | 2400 | The optimum for YOLO26 at full labels: 27k → 4,800 → 2,400 frames kept improving, and 1,200 loses the gain over the GT-only control (`architectures`). With 10–25% of the labels, 4,800 does slightly better (`fractions-2400`); that's left as future work. |
 | `--pl-soft-weights` | on | Part of every best configuration since `pool`. |
 | `--ema-decay` | 0.9996 | Removes most of the late drift; 0.9998 adds nothing. |
+| `--pl-input-scale-bins` | on | Size bins at the network input scale, so they mean the same on any image resolution (needed for UCWD, whose images range from 1200×800 to 5472×3648). Adopted on principle, not from an ablation; all batches below ran with original-pixel bins. |
 
 Earlier batches pin their original settings explicitly in `ablation.py` (EMA 0.999, hard labels,
-full pool via `--pl-images-per-epoch -1`), so they reproduce exactly.
+full pool via `--pl-images-per-epoch -1`, original-pixel size bins via `--no-pl-input-scale-bins`),
+so they reproduce exactly.
 
 ## How runs are kept comparable
 
@@ -480,6 +482,7 @@ supervised starting point.
 | `--tail-ratio r` | Fraction of GT placed, unmixed, at the end of each epoch (default 0.25; 0 mixes all GT with the pseudo-labels). |
 | `--pl-strong-aug` | Stronger colour jitter, blur and random erasing on pseudo-labelled images only. |
 | `--unsupervised-weight λ` | Multiply the pseudo-label loss by λ. |
+| `--no-pl-input-scale-bins` | Take pseudo-label size bins in original image pixels instead of at the network input scale. Every batch in this file runs with it (pinned via `LEGACY_SIZE_BINS`), since they predate input-scale bins. On FloW-img (1280 px wide, `imgsz` 640) this shifts the bin limits by 2× per side, so earlier results remain internally consistent. |
 | `--pl-cls-only` | Pseudo-boxes contribute to the classification loss only, with no box regression. Ground-truth boxes are unaffected. |
 | `--seed n` | Seed for the per-epoch pseudo-label sample, epoch ordering and augmentation (default 42). |
 | `--lr0`, `--ema-decay` | Student learning rate and Teacher EMA decay (default 0.9996). |
