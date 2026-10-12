@@ -155,6 +155,14 @@ TUNED_SEED_RUNS: dict[str, list[tuple[str, Path]]] = {
     config: [(seed, MT / f"ablation-tuned-seeds/{config}-seed{seed}") for seed in SEEDS]
     for config in ("final", "gt-only")
 }
+# Label staleness: Teacher snapshot for pseudo-labelling refreshed every k epochs (k=1: loo-seeds final).
+PL_LAG_SEED_RUNS: dict[str, list[tuple[str, Path]]] = {
+    "lag1": LOO_SEED_RUNS["final"],
+    **{
+        f"lag{k}": [(seed, MT / f"ablation-pl-lag/lag{k}-seed{seed}") for seed in SEEDS]
+        for k in (3, 8)
+    },
+}
 UCWD = MT / "ablation-ucwd"
 UCWD_RUNS = [
     Run("25pct-ssl", UCWD / "25pct-ssl", pl_cap=2303),
@@ -490,6 +498,10 @@ def main(
     write(tuned, out_dir, "ssod_tuned_seed_runs.csv")
     write(seed_summary(tuned, references=("gt-only",)), out_dir, "ssod_tuned_seed_summary.csv")
     write(seed_curves(TUNED_SEED_RUNS), out_dir, "ssod_tuned_seed_curves.csv")
+    lag = seed_runs(PL_LAG_SEED_RUNS)
+    write(lag, out_dir, "ssod_pl_lag_seed_runs.csv")
+    write(seed_summary(lag, references=("lag1",)), out_dir, "ssod_pl_lag_seed_summary.csv")
+    write(seed_curves(PL_LAG_SEED_RUNS), out_dir, "ssod_pl_lag_seed_curves.csv")
     write(ucwd(), out_dir, "ssod_ucwd.csv")
     write(curves(UCWD_RUNS), out_dir, "ssod_ucwd_curves.csv")
     write(architectures(), out_dir, "ssod_architectures.csv")

@@ -275,6 +275,9 @@ class MeanTeacherConfig:
     pl_cls_only: bool = False  # pseudo boxes train classification only (no box/DFL regression)
     pl_size_bins: bool = True  # ground threshold per COCO size bin (False: one for all boxes)
     pl_input_scale_bins: bool = True  # size bins at the network input scale (False: original pixels)
+    # Epochs between refreshes of the Teacher snapshot that pseudo-labels (1: every epoch). Larger
+    # values make the labels deliberately staler, to test how much label staleness matters.
+    pl_teacher_refresh_epochs: int = 1
     pl_multi_view: bool = True  # Teacher inference on normal + flipped views (False: normal only)
 
     # Pseudo-labeling parameters
@@ -461,6 +464,11 @@ def configure_student_criterion(model: nn.Module) -> Any:
         criterion.o2o = max(criterion.total - criterion.o2m, 0.0)
     model.criterion = criterion
     return criterion
+
+
+def pl_teacher_due(epoch: int, refresh_epochs: int) -> bool:
+    """Whether the pseudo-labelling Teacher snapshot is refreshed at 0-based `epoch`."""
+    return epoch % max(1, refresh_epochs) == 0
 
 
 def pl_stat_columns(gen_out: Any | None) -> dict[str, float]:
@@ -880,7 +888,7 @@ class MeanTeacherTrainer:
                             setattr(self.config, k, Path(v).resolve())
                         elif k in ("unsupervised_weight", "ema_decay", "tail_ratio", "close_mosaic_ratio", "lr0", "lrf", "pseudo_fallback_threshold"):
                             setattr(self.config, k, float(v))
-                        elif k in ("ssl_epochs", "warmup_epochs", "batch_size", "imgsz", "workers", "unsupervised_warmup_epochs", "gt_repeat", "seed"):
+                        elif k in ("ssl_epochs", "warmup_epochs", "batch_size", "imgsz", "workers", "unsupervised_warmup_epochs", "gt_repeat", "seed", "pl_teacher_refresh_epochs"):
                             setattr(self.config, k, int(v))
                         elif k in ("pl_strong_aug", "pl_soft_weights", "pl_cls_only", "pl_size_bins", "pl_multi_view", "pl_input_scale_bins"):
                             setattr(self.config, k, bool(v))
@@ -1419,7 +1427,14 @@ class MeanTeacherTrainer:
                     dataset_handler.reload_pseudo_labels(filtered_df=pl.DataFrame())
                 else:
                     teacher.save(str(last_path))
-                    inference_teacher = YOLO(str(last_path))
+                    pl_teacher_path = self.weights_dir / "pl_teacher.pt"
+                    if (
+                        pl_teacher_due(epoch, self.config.pl_teacher_refresh_epochs)
+                        or not pl_teacher_path.is_file()
+                    ):
+                        teacher.save(str(pl_teacher_path))
+                        self.logger.info("Refreshed the pseudo-labelling Teacher snapshot.")
+                    inference_teacher = YOLO(str(pl_teacher_path))
                     pseudo_generator.model = inference_teacher
                     if hasattr(pseudo_generator.model, "predictor"):
                         pseudo_generator.model.predictor = None
@@ -1763,6 +1778,12 @@ def main(
         "--pl-input-scale-bins/--no-pl-input-scale-bins",
         help="Take pseudo-label COCO size bins at the network input scale (off: original image pixels).",
     ),
+    pl_teacher_refresh_epochs: int = typer.Option(
+        1,
+        "--pl-teacher-refresh-epochs",
+        min=1,
+        help="Epochs between refreshes of the Teacher snapshot used for pseudo-labeling (1: every epoch).",
+    ),
     max_pseudo_images: Optional[int] = typer.Option(
         None, "--max-pseudo-images", help="Max unlabeled images for pseudo-labeling."
     ),
@@ -1886,6 +1907,9 @@ def main(
     chosen_pseudo_fallback_threshold = float(pick_val("pseudo_fallback_threshold", pseudo_fallback_threshold, "pseudo_fallback_threshold", 0.4))
     chosen_save_candidates = bool(pick_val("save_candidates", save_candidates, "save_candidates", False))
     chosen_seed = int(pick_val("seed", seed, "seed", 42))
+    chosen_pl_teacher_refresh_epochs = int(
+        pick_val("pl_teacher_refresh_epochs", pl_teacher_refresh_epochs, "pl_teacher_refresh_epochs", 1)
+    )
 
     cfg = MeanTeacherConfig(
         model_name=str(chosen_model),
@@ -1920,6 +1944,7 @@ def main(
         pseudo_fallback_threshold=chosen_pseudo_fallback_threshold,
         save_candidates=chosen_save_candidates,
         seed=chosen_seed,
+        pl_teacher_refresh_epochs=chosen_pl_teacher_refresh_epochs,
         runs_dir=project,
         experiment_name=name,
     )

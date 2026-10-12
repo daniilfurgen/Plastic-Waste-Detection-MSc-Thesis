@@ -472,6 +472,40 @@ from the hyperparameter-tuned YOLO26m (0.448). The tuned model is the external r
 standard supervised training reaches; this batch asks whether SSL still adds anything on top of
 it. 6 runs, about 2.5 h.
 
+#### `pl-lag`: does label staleness matter?
+
+Pseudo-labels are generated once per epoch, because the size-bin thresholds need the score
+histogram of all candidates, whereas Unbiased Teacher and similar methods label every step with the
+current Teacher. So labels go stale within an epoch. An offline check on the saved candidates
+compares the kept pseudo-labels of the same images when they were sampled in two different epochs
+(box F1 at IoU ≥ 0.5, sampled thresholds included). The change over two epochs minus the change over
+one gives the Teacher's drift per epoch; the rest is a noise floor (threshold jitter, low-score NMS).
+
+| Run | Steps/epoch | Change over 1 epoch | Drift/epoch | Floor |
+|---|---|---|---|---|
+| `loo-seeds/final-seed42` (cap 2,400, EMA 0.9996) | 215 | 1.8% | ≈ 0.7% | ≈ 1.1% |
+| `loo-seeds/fast-ema-seed42` (EMA 0.999) | 217 | 2.1% | ≈ 1.5% | ≈ 0.6% |
+| `components/no-cap` (whole pool, EMA 0.9996) | 1,691 | 2.7% | ≈ 1.5% | ≈ 1.2% |
+| `ablation/control` (whole pool, EMA 0.999) | 1,743 | 3.8% | ≈ 2.1% | ≈ 1.7% |
+
+Within an epoch labels are on average half an epoch old, i.e. under ~1% different from fresh ones,
+even with the whole pool. `no-cap` still drops from 0.448 to 0.428 within two epochs, so per-step
+labels (≈ 98% identical) would not prevent that; the likelier cause is the pseudo-label share of
+the epoch (~95% with the whole pool) and the Student fitting the Teacher's systematic errors. The
+per-epoch thresholds jump between neighbouring histogram bins (small 0.26–0.36, medium 0.21–0.60,
+large mostly the 0.4 fallback) without a trend: estimation noise from 2,400 images, not staleness.
+
+The batch tests staleness causally by making labels deliberately staler: `--pl-teacher-refresh-epochs
+k` refreshes the pseudo-labelling Teacher snapshot (`weights/pl_teacher.pt`) only every k epochs,
+while images are still sampled fresh each epoch and the Teacher itself (EMA, evaluation, checkpoint
+selection) is unchanged. Runs: `final` with k = 3 and k = 8 over seeds 42–44, compared with `final`
+of `loo-seeds` (k = 1). Output: `runs/mean_teacher/ablation-pl-lag/`, 6 runs, about 2.5 h.
+
+- k = 3 and 8 within noise of k = 1 (< ~0.003): staleness is not what limits the pipeline, and
+  per-step pseudo-labelling is not worth the redesign.
+- A clear, monotonic loss with k: staleness matters, and per-step labelling with thresholds from a
+  decayed running histogram (initialised from the post-warm-up candidates) is the next step.
+
 #### `ucwd`: UCWD baseline at imgsz 640
 
 Output: `runs/mean_teacher/ablation-ucwd/`. UCWD is coastal UAV litter with 7 classes, so the
@@ -575,6 +609,7 @@ mAP50-95 quoted in this README by about ±0.001.
 | `ssod_add_one_in.csv`, `ssod_add_one_in_curves.csv` | The `add-one-in` batch with its references, including the change from `minimal`. |
 | `ssod_loo_seed_runs.csv`, `ssod_loo_seed_summary.csv`, `ssod_loo_seed_curves.csv` | `loo-seeds`: one row per seed run, mean ± std per configuration with differences from `final` and `gt-only`, and per-epoch curves. |
 | `ssod_tuned_seed_runs.csv`, `ssod_tuned_seed_summary.csv`, `ssod_tuned_seed_curves.csv` | The same for `tuned-seeds`, with differences from `gt-only`. |
+| `ssod_pl_lag_seed_runs.csv`, `ssod_pl_lag_seed_summary.csv`, `ssod_pl_lag_seed_curves.csv` | `pl-lag` with `loo-seeds/final` as k = 1 (`lag1`), with differences from `lag1`. |
 | `ssod_ucwd.csv`, `ssod_ucwd_curves.csv` | UCWD: supervised 25% and 100%, Mean Teacher and GT-only control on 25% (COCO metrics), and per-epoch curves. |
 | `ssod_seed_runs.csv`, `ssod_seed_summary.csv` | One row per seed run of `final`, `simple`, `minimal` and `gt-only` (best-epoch metrics, late mean, final), and their mean and standard deviation per configuration. |
 | `ssod_architectures.csv` | Supervised, GT-only control and each cap for YOLO26m, YOLO11m and YOLO12m. |
@@ -599,6 +634,7 @@ supervised starting point.
 | `--unsupervised-weight λ` | Multiply the pseudo-label loss by λ. |
 | `--no-pl-input-scale-bins` | Take pseudo-label size bins in original image pixels instead of at the network input scale. Every batch in this file runs with it (pinned via `LEGACY_SIZE_BINS`), since they predate input-scale bins. On FloW-img (1280 px wide, `imgsz` 640) this shifts the bin limits by 2× per side, so earlier results remain internally consistent. |
 | `--pl-cls-only` | Pseudo-boxes contribute to the classification loss only, with no box regression. Ground-truth boxes are unaffected. |
+| `--pl-teacher-refresh-epochs k` | Refresh the Teacher snapshot that pseudo-labels only every k epochs (default 1); images are still sampled every epoch. |
 | `--seed n` | Seed for the per-epoch pseudo-label sample, epoch ordering and augmentation (default 42). |
 | `--lr0`, `--ema-decay` | Student learning rate and Teacher EMA decay (default 0.9996). |
 | `--close-mosaic-ratio r` | Fraction of final epochs with GT Mosaic off (default 0.1; 0 keeps it on throughout). |

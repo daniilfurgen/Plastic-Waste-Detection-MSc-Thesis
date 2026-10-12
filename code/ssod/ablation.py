@@ -23,6 +23,7 @@ Batches:
   mechanisms, add-one-in, seeds  see ABLATION.md
   loo-seeds              leave-one-out of every component x seeds 42-44, pipeline warm-up (runs/mean_teacher/ablation-loo-seeds)
   tuned-seeds            final and GT-only control x seeds 42-44 from the tuned YOLO26m (runs/mean_teacher/ablation-tuned-seeds)
+  pl-lag                 final with the pseudo-labelling Teacher refreshed every 3 / 8 epochs x seeds 42-44 (runs/mean_teacher/ablation-pl-lag)
   ucwd                   UCWD at imgsz 640: supervised warm-up on all labels; SSL vs. control on 25% (runs/mean_teacher/ablation-ucwd)
 
 Batches up to fractions-2400 bin pseudo-labels in original pixels (pinned); later ones use the
@@ -459,6 +460,16 @@ BATCHES["tuned-seeds"] = Batch(
     project=Path("runs/mean_teacher/ablation-tuned-seeds"),
     runs=seeded({"final": FINAL_SSL, "gt-only": GT_ONLY_2400}),
     warmup_weights=TUNED_WARMUP_WEIGHTS,
+)
+
+# Label staleness test: the final configuration with the pseudo-labelling Teacher refreshed only
+# every k epochs (images are still sampled fresh every epoch). If deliberately staler labels do not
+# hurt, refreshing them within an epoch cannot help much. k = 1 is `final` in `loo-seeds`.
+BATCHES["pl-lag"] = Batch(
+    project=Path("runs/mean_teacher/ablation-pl-lag"),
+    runs=seeded({
+        f"lag{k}": [*FINAL_SSL, "--pl-teacher-refresh-epochs", str(k)] for k in (3, 8)
+    }),
 )
 
 # UCWD (coastal UAV litter, 7 classes) baseline at imgsz 640: the supervised warm-up on all labels,

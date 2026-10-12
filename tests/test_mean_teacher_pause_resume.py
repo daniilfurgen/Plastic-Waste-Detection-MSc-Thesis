@@ -77,6 +77,7 @@ class TestMeanTeacherCLIOptions(unittest.TestCase):
                         "--no-pl-size-bins",
                         "--no-pl-multi-view",
                         "--seed", "7",
+                        "--pl-teacher-refresh-epochs", "3",
                         "--close-mosaic-ratio", "0",
                         "--project", str(test_dir),
                         "--name", "cli",
@@ -92,6 +93,7 @@ class TestMeanTeacherCLIOptions(unittest.TestCase):
             self.assertFalse(cfg.pl_size_bins)
             self.assertFalse(cfg.pl_multi_view)
             self.assertEqual(cfg.seed, 7)
+            self.assertEqual(cfg.pl_teacher_refresh_epochs, 3)
         finally:
             shutil.rmtree(test_dir, ignore_errors=True)
 

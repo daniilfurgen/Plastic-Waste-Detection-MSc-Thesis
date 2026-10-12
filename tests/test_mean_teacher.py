@@ -29,6 +29,7 @@ from ssod.mean_teacher import (  # noqa: E402
     compute_batch_loss,
     configure_student_criterion,
     discover_coco_gt_path,
+    pl_teacher_due,
     split_batch,
     update_teacher_ema,
 )
@@ -340,6 +341,17 @@ class TestCOCOGroundTruthDiscovery(unittest.TestCase):
             self.assertEqual(discover_coco_gt_path(yaml_path), root / "ucwd" / "val" / "annotations.json")
         finally:
             shutil.rmtree(root, ignore_errors=True)
+
+
+class TestPseudoLabelTeacherRefresh(unittest.TestCase):
+    """The pseudo-labelling Teacher snapshot is refreshed every k epochs, starting at the first."""
+
+    def test_every_epoch_by_default(self):
+        self.assertTrue(all(pl_teacher_due(epoch, 1) for epoch in range(10)))
+
+    def test_every_k_epochs(self):
+        self.assertEqual([e for e in range(10) if pl_teacher_due(e, 3)], [0, 3, 6, 9])
+        self.assertEqual([e for e in range(15) if pl_teacher_due(e, 8)], [0, 8])
 
 
 class TestMeanTeacherIntegration(unittest.TestCase):
