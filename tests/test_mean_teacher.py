@@ -285,7 +285,7 @@ class TestCOCOMetrics(unittest.TestCase):
 
 
 class TestCOCOMultiClass(unittest.TestCase):
-    """Multi-class predictions keep their class ids when the GT uses the same ids."""
+    """Ultralytics' 1-based category ids map back to the GT's YOLO class ids."""
 
     def setUp(self):
         self.temp_dir = Path(tempfile.mkdtemp())
@@ -301,19 +301,25 @@ class TestCOCOMultiClass(unittest.TestCase):
         }
         self.gt_path.write_text(json.dumps(gt))
         preds = [
-            {"image_id": "a", "file_name": "a.jpg", "category_id": 0, "bbox": [10, 10, 50, 50], "score": 0.9},
-            {"image_id": "a", "file_name": "a.jpg", "category_id": 1, "bbox": [200, 200, 60, 60], "score": 0.9},
-            {"image_id": "a", "file_name": "a.jpg", "category_id": 7, "bbox": [400, 400, 20, 20], "score": 0.5},
+            {"image_id": "a", "file_name": "a.jpg", "category_id": 1, "bbox": [10, 10, 50, 50], "score": 0.9},
+            {"image_id": "a", "file_name": "a.jpg", "category_id": 2, "bbox": [200, 200, 60, 60], "score": 0.9},
+            {"image_id": "a", "file_name": "a.jpg", "category_id": 8, "bbox": [400, 400, 20, 20], "score": 0.5},
         ]
         self.pred_path.write_text(json.dumps(preds))
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def test_class_ids_preserved(self):
+    def test_class_ids_mapped(self):
         fixed = fix_prediction_ids(self.pred_path, self.gt_path, default_category_id=0)
         self.assertEqual([p["category_id"] for p in fixed], [0, 1, 0])  # unknown id -> default
         self.assertTrue(all(p["image_id"] == 1 for p in fixed))
+
+    def test_predictions_file_unchanged(self):
+        before = self.pred_path.read_text()
+        fix_prediction_ids(self.pred_path, self.gt_path)
+        evaluate_coco(self.gt_path, self.pred_path)
+        self.assertEqual(self.pred_path.read_text(), before)
 
     def test_multiclass_map(self):
         metrics = evaluate_coco(self.gt_path, self.pred_path, default_category_id=0)

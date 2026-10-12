@@ -24,38 +24,34 @@ def fix_prediction_ids(
     predictions_path: Path | str,
     coco_gt_path: Path | str,
     default_category_id: int = 0,
+    category_offset: int = 1,
 ) -> list[dict[str, Any]]:
     """
-    Harmonize image_id and category_id in Ultralytics predictions.json
-    with the reference COCO ground truth annotations.json.
+    Ultralytics predictions.json harmonised with the reference COCO annotations.json: image ids
+    matched by file name, and category ids mapped back to the GT's.
+
+    For non-COCO datasets Ultralytics writes class index + 1 as category_id, while the GT
+    annotations here use the YOLO class index; `category_offset` undoes that. Ids that are still
+    unknown to the GT fall back to `default_category_id`. The file itself is not modified, so
+    predictions can be evaluated any number of times.
     """
     pred_path = Path(predictions_path)
-    gt_path = Path(coco_gt_path)
-
     if not pred_path.exists():
         return []
-
     with open(pred_path, "r", encoding="utf-8") as f:
         predictions = json.load(f)
-
     if not predictions:
         return []
-
-    with open(gt_path, "r", encoding="utf-8") as f:
+    with open(coco_gt_path, "r", encoding="utf-8") as f:
         coco_gt = json.load(f)
 
     img_name_to_id = {img["file_name"]: img["id"] for img in coco_gt.get("images", [])}
-    stem_to_id = {
-        Path(img["file_name"]).stem: img["id"] for img in coco_gt.get("images", [])
-    }
-
-    # Ultralytics writes 0-based class indices as category_id for non-COCO datasets; keep them
-    # when the GT uses the same ids (multi-class), otherwise fall back to the default category
+    stem_to_id = {Path(img["file_name"]).stem: img["id"] for img in coco_gt.get("images", [])}
     gt_category_ids = {cat["id"] for cat in coco_gt.get("categories", [])}
 
     for pred in predictions:
-        if pred.get("category_id") not in gt_category_ids:
-            pred["category_id"] = default_category_id
+        category = pred.get("category_id", default_category_id) - category_offset
+        pred["category_id"] = category if category in gt_category_ids else default_category_id
         file_name = pred.get("file_name")
         if file_name and file_name in img_name_to_id:
             pred["image_id"] = img_name_to_id[file_name]
@@ -63,10 +59,6 @@ def fix_prediction_ids(
             pred["image_id"] = stem_to_id[Path(file_name).stem]
         elif "image_id" in pred and str(pred["image_id"]) in stem_to_id:
             pred["image_id"] = stem_to_id[str(pred["image_id"])]
-
-    with open(pred_path, "w", encoding="utf-8") as f:
-        json.dump(predictions, f)
-
     return predictions
 
 
@@ -75,6 +67,7 @@ def evaluate_coco(
     predictions_path: Path | str,
     fix_ids: bool = True,
     default_category_id: int = 0,
+    category_offset: int = 1,
     logger: logging.Logger | None = None,
 ) -> dict[str, float]:
     """
@@ -120,13 +113,15 @@ def evaluate_coco(
         )
         return default_zero_metrics
 
-    if fix_ids:
-        fix_prediction_ids(pred_path, gt_path, default_category_id=default_category_id)
-
-    # Check if predictions file contains detections
     try:
-        with open(pred_path, "r", encoding="utf-8") as f:
-            preds = json.load(f)
+        if fix_ids:
+            preds = fix_prediction_ids(
+                pred_path, gt_path, default_category_id=default_category_id,
+                category_offset=category_offset,
+            )
+        else:
+            with open(pred_path, "r", encoding="utf-8") as f:
+                preds = json.load(f)
     except Exception as e:
         log.warning(f"Failed to read predictions from {pred_path}: {e}")
         return default_zero_metrics
@@ -139,7 +134,7 @@ def evaluate_coco(
 
     try:
         coco_gt = COCO(str(gt_path))
-        coco_dt = coco_gt.loadRes(str(pred_path))
+        coco_dt = coco_gt.loadRes(preds)
 
         coco_eval = COCOeval(coco_gt, coco_dt, "bbox")
         coco_eval.evaluate()
@@ -148,10 +143,12 @@ def evaluate_coco(
 
         stats = coco_eval.stats
 
-        # Peak F1 Calculation at IoU=0.50
+        # Peak F1 at IoU=0.50 on the class-averaged precision-recall curve
         # precision array dimensions: [T, R, K, A, M]
-        # T=0 (IoU=0.50), K=0 (first category), A=0 (all areas), M=2 (maxDets=100)
-        precisions = coco_eval.eval["precision"][0, :, 0, 0, 2]
+        # T=0 (IoU=0.50), all categories K, A=0 (all areas), M=2 (maxDets=100)
+        per_class = coco_eval.eval["precision"][0, :, :, 0, 2]
+        evaluated = per_class[:, (per_class > -1).any(axis=0)]  # categories present in the GT
+        precisions = evaluated.mean(axis=1) if evaluated.shape[1] else np.full(101, -1.0)
         recalls = np.linspace(0, 1, 101)
         valid_idx = precisions > -1
 
