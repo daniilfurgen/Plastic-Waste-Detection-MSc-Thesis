@@ -15,6 +15,42 @@
   hack(right)
 }
 
+/// Таблиця у вигляді рисунка з необов'язковою приміткою під нею.
+///
+/// Решта іменованих і позиційних аргументів передається в `table`
+/// (`columns`, `align`, `table.header(..)`, комірки). Мітку для посилань
+/// додають після виклику: `#table-figure(..) <tab-name>`.
+///
+/// - caption (content): підпис таблиці.
+/// - note (content, none): примітка під таблицею.
+/// - placement (alignment, none): розміщення рисунка (`top`, `bottom`, `auto`).
+/// - scope (str): `"column"` або `"parent"`.
+#let table-figure(caption, note: none, placement: none, scope: "column", ..table-args) = figure(
+  caption: caption,
+  placement: placement,
+  scope: scope,
+  {
+    set text(size: 0.85em)
+    set par(justify: false)
+    stack(
+      spacing: .65em,
+      table(
+        fill: (x, y) => if y == 0 { luma(200) },
+        ..table-args,
+      ),
+      ..if note != none {
+        (
+          {
+            set align(left)
+            set par(justify: true, first-line-indent: 0em)
+            note
+          },
+        )
+      },
+    )
+  },
+)
+
 #let config(body) = {
   // Відступ між рядками
   let line-spacing = .65em
@@ -68,14 +104,18 @@
   show outline.entry.where(level: 1): set text(weight: "bold")
 
   // Налаштування підписів
-  show figure.where(kind: table): set figure.caption(position: top)
-  show figure.where(kind: table): set align(right)
+  show figure.where(kind: table): fig => {
+    set figure.caption(position: top)
+    show figure.caption: set align(right)
+    fig
+  }
   set figure.caption(separator: [. ])
 
   // Налаштування відступів рисунтів
   show figure: body => {
     set par(leading: line-spacing)
-    block(above: line-spacing * 3, below: line-spacing * 3, body)
+    set block(above: line-spacing * 3, below: line-spacing * 3)
+    body
   }
   // Вирінвнювання в таблицях
   show table.cell: set align(horizon)
