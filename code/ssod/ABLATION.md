@@ -501,10 +501,24 @@ while images are still sampled fresh each epoch and the Teacher itself (EMA, eva
 selection) is unchanged. Runs: `final` with k = 3 and k = 8 over seeds 42–44, compared with `final`
 of `loo-seeds` (k = 1). Output: `runs/mean_teacher/ablation-pl-lag/`, 6 runs, about 2.5 h.
 
-- k = 3 and 8 within noise of k = 1 (< ~0.003): staleness is not what limits the pipeline, and
-  per-step pseudo-labelling is not worth the redesign.
-- A clear, monotonic loss with k: staleness matters, and per-step labelling with thresholds from a
-  decayed running histogram (initialised from the post-warm-up candidates) is the next step.
+Result (COCO mAP50-95, mean ± std over seeds 42–44; late = epochs 8–15):
+
+| k | Best | Late | Final |
+|---|---|---|---|
+| 1 (`loo-seeds/final`) | 0.4429 ± 0.0019 | 0.4419 ± 0.0016 | 0.4423 ± 0.0024 |
+| 3 | 0.4430 ± 0.0010 | 0.4421 ± 0.0013 | 0.4411 ± 0.0017 |
+| 8 | 0.4441 ± 0.0012 | 0.4433 ± 0.0008 | 0.4432 ± 0.0018 |
+
+Takeaways:
+- **Label staleness does not limit the pipeline.** With k = 8 the labelling Teacher is refreshed
+  only at epochs 1 and 9, so labels lag the Teacher by up to 8 epochs, and the result is no worse
+  than refreshing every epoch (the late mean is even slightly higher for every seed, within noise).
+  Per-step pseudo-labelling is not worth the redesign.
+- **The SSL gain does not come from the Teacher progressively improving the labels.** An almost
+  frozen labeller gives the same result, so the gain is from training on the extra unlabeled
+  images with near-fixed pseudo-labels and the slow EMA Teacher.
+- A decayed running histogram for the thresholds remains a possible way to steady the noisy
+  per-epoch thresholds, but no mAP gain is expected from it.
 
 #### `ucwd`: UCWD baseline at imgsz 640
 
