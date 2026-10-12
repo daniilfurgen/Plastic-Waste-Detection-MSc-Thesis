@@ -26,8 +26,19 @@ dependencies = [
 [dependency-groups]
 dev = [
     "mypy>=2.1.0",
+    "pytest>=9.1.1",
     "ruff>=0.15.18",
 ]
 
 [[tool.uv.index]]
 url = "https://download.pytorch.org/whl/cu132"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["code"]
+addopts = "-ra --strict-markers"
+markers = [
+    "slow: runs real training loops or multi-worker data loading",
+    "integration: exercises several components end to end",
+    "needs_artifacts: requires local run artifacts that are not tracked in git",
+]

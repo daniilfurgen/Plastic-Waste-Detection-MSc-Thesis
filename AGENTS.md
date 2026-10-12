@@ -16,7 +16,7 @@ This repository contains the Master's Thesis project of Daniil Sanzharov. The re
     - `metrics.py`: Standalone COCO evaluation and prediction ID harmonization module (`evaluate_coco`, `fix_prediction_ids`) computing multi-scale AP (`mAP_s`, `mAP_m`, `mAP_l`), AR, and peak $F_1$ score via `pycocotools.cocoeval`; Ultralytics' 1-based category ids for non-COCO datasets are mapped back to the GT's YOLO class ids (unknown ids to a default category) without rewriting `predictions.json`; peak $F_1$ uses the class-averaged precision-recall curve.
     - `pseudo_labeling.py`: Pseudo-label generator, organised as small single-purpose functions with `PseudoLabelGenerator.generate()` reading as the algorithm (prepare image pool → multi-view candidates → per-bin thresholds → selection and weights → YOLO label files) and returning a `PseudoLabelResult` dataclass. Features 2-view candidate inference (native + horizontal flip, merged by class-wise NMS), batched FP16 inference with threaded image decoding, Polars candidate tables (Parquet export, fixed `CANDIDATE_SCHEMA`), COCO size-bin ground thresholding with box areas taken at the network input scale (`imgsz`; switchable to original pixels) (valley between the noise and object modes of the full-range score histogram, with a fallback threshold when no valley exists), threshold-aware per-box weights on by default (0 at the bin's threshold, rising linearly to 1 at the bin's object mode; written as a 6th label column), optional uniform image sampling, switches to disable size-bin thresholding (one shared threshold) or the flipped view for ablation, clean-slate annotation cleanup, and Typer CLI (`--model` required).
     - `utilities.py`: Project-wide structured logging (`get_logger`) and shared utilities.
-- `tests/`: Automated unit and integration test suite covering SSOD augmentations, samplers, EMA updates, loss functions, COCO evaluation, and dataset lifecycles.
+- `tests/`: Automated pytest unit and integration test suite covering SSOD augmentations, samplers, EMA updates, loss functions, COCO evaluation, and dataset lifecycles. Shared fixtures live in `conftest.py`; pytest config (including `pythonpath` and the `slow`, `integration` and `needs_artifacts` markers) is in `pyproject.toml`. Run with `uv run pytest`, or `uv run pytest -m "not slow"` for the fast subset.
 - `paper/`: Raw Typst files for the thesis paper and conference abstracts.
   - `ВКР-Магістр-Санжаров.typ`: Main thesis document.
   - `sources.bib`: Bibliography in BibLaTeX format.
@@ -24,7 +24,7 @@ This repository contains the Master's Thesis project of Daniil Sanzharov. The re
 
 ## Technical Stack
 
-- **Environment Management:** [uv](https://github.com/astral-sh/uv). Use `uv` for all dependency management and execution.
+- **Environment Management:** [uv](https://github.com/astral-sh/uv). Use `uv` for all dependency management and execution of scripts and tooling.
 - **Python Version:** 3.12+
 - **Core Dependencies:** `ultralytics`, `supervision`, `torch`, `torchvision`, `polars`, `typer`, `onnxruntime-gpu`.
 - **Document Generation:** Typst.

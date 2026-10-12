@@ -5,26 +5,14 @@ Automated unit and integration tests for YOLO Mean Teacher training loop.
 from __future__ import annotations
 
 import json
-from pathlib import Path
-import shutil
-import sys
-import tempfile
-import unittest
 
-import cv2
-import numpy as np
+import pytest
 import torch
 import torch.nn as nn
 from ultralytics import YOLO
 from ultralytics.utils import DEFAULT_CFG_DICT, IterableSimpleNamespace
 
-# Ensure code directory is on sys.path
-REPO_ROOT = Path(__file__).resolve().parent.parent
-CODE_DIR = REPO_ROOT / "code"
-if str(CODE_DIR) not in sys.path:
-    sys.path.insert(0, str(CODE_DIR))
-
-from ssod.mean_teacher import (  # noqa: E402
+from ssod.mean_teacher import (
     MeanTeacherConfig,
     compute_batch_loss,
     configure_student_criterion,
@@ -33,22 +21,10 @@ from ssod.mean_teacher import (  # noqa: E402
     split_batch,
     update_teacher_ema,
 )
-from ssod.metrics import evaluate_coco, fix_prediction_ids  # noqa: E402
+from ssod.metrics import evaluate_coco, fix_prediction_ids
 
 
-def _create_synthetic_image(path: Path, width: int = 128, height: int = 128) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    img = np.random.randint(0, 256, (height, width, 3), dtype=np.uint8)
-    cv2.imwrite(str(path), img)
-
-
-def _create_synthetic_label(path: Path, lines: list[str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    content = "\n".join(lines) + ("\n" if lines else "")
-    path.write_text(content, encoding="utf-8")
-
-
-class TestMeanTeacherEMA(unittest.TestCase):
+class TestMeanTeacherEMA:
     """Test step-level Exponential Moving Average parameter updates."""
 
     def test_update_teacher_ema_floating_point(self):
@@ -70,63 +46,65 @@ class TestMeanTeacherEMA(unittest.TestCase):
         # Decay = 0.9: new teacher = 0.9 * 1.0 + 0.1 * 3.0 = 1.2
         update_teacher_ema(teacher, student, decay=0.9)
 
-        expected_weight = torch.full((2, 4), 1.2)
-        self.assertTrue(torch.allclose(teacher.fc.weight, expected_weight, atol=1e-5))
+        torch.testing.assert_close(teacher.fc.weight, torch.full((2, 4), 1.2), atol=1e-5, rtol=0)
         # Non-floating buffer copied directly
-        self.assertEqual(teacher.counter.item(), 20)
+        assert teacher.counter.item() == 20
 
 
-class TestMeanTeacherLoss(unittest.TestCase):
+@pytest.fixture
+def student(yolo26n_path):
+    """Fresh trainable YOLO26n network; function-scoped because tests backpropagate through it."""
+    net = YOLO(yolo26n_path).model
+    net.args = IterableSimpleNamespace(**dict(DEFAULT_CFG_DICT))
+    net.train()
+    for p in net.parameters():
+        p.requires_grad = True
+    return net
+
+
+@pytest.fixture
+def mixed_batch() -> dict:
+    return {
+        "img": torch.zeros(3, 3, 640, 640),
+        "bboxes": torch.tensor(
+            [[0.5, 0.5, 0.2, 0.2], [0.3, 0.3, 0.1, 0.1], [0.6, 0.4, 0.2, 0.3], [0.4, 0.6, 0.2, 0.2]]
+        ),
+        "cls": torch.zeros(4, 1),
+        "batch_idx": torch.tensor([0.0, 1.0, 1.0, 2.0]),
+        "is_pseudo": torch.tensor([False, True, True]),
+        "pl_weight": torch.tensor([1.0, 0.5, 0.8, 1.0]),
+    }
+
+
+class TestMeanTeacherLoss:
     """Test batch splitting and default YOLO loss with unsupervised weighting."""
 
-    def setUp(self):
-        self.model = YOLO("yolo26n.pt")
-        cfg_dict = dict(DEFAULT_CFG_DICT)
-        self.model.model.args = IterableSimpleNamespace(**cfg_dict)
-        self.model.model.train()
-        for p in self.model.model.parameters():
-            p.requires_grad = True
-
     def test_split_batch(self):
-        img = torch.zeros(3, 3, 64, 64, dtype=torch.float32)
-        bboxes = torch.tensor([[0.5, 0.5, 0.2, 0.2], [0.3, 0.3, 0.1, 0.1]], dtype=torch.float32)
-        cls = torch.tensor([[0.0], [0.0]], dtype=torch.float32)
-        batch_idx = torch.tensor([0.0, 2.0], dtype=torch.float32)
-        mask = torch.tensor([True, False, True])
-
-        batch = {"img": img, "bboxes": bboxes, "cls": cls, "batch_idx": batch_idx}
-        sliced = split_batch(batch, mask)
-
-        self.assertEqual(sliced["img"].shape[0], 2)
-        self.assertEqual(sliced["bboxes"].shape[0], 2)
-        # batch_idx remapped from [0, 2] to [0, 1]
-        self.assertEqual(sliced["batch_idx"].tolist(), [0.0, 1.0])
-
-    def test_compute_batch_loss_backward(self):
-        img = torch.zeros(2, 3, 640, 640, dtype=torch.float32)
-        bboxes = torch.tensor([[0.5, 0.5, 0.2, 0.2]], dtype=torch.float32)
-        cls = torch.tensor([[0.0]], dtype=torch.float32)
-        batch_idx = torch.tensor([0.0], dtype=torch.float32)
-        is_pseudo = torch.tensor([False, True])
-
         batch = {
-            "img": img,
-            "bboxes": bboxes,
-            "cls": cls,
-            "batch_idx": batch_idx,
-            "is_pseudo": is_pseudo,
+            "img": torch.zeros(3, 3, 64, 64, dtype=torch.float32),
+            "bboxes": torch.tensor([[0.5, 0.5, 0.2, 0.2], [0.3, 0.3, 0.1, 0.1]], dtype=torch.float32),
+            "cls": torch.tensor([[0.0], [0.0]], dtype=torch.float32),
+            "batch_idx": torch.tensor([0.0, 2.0], dtype=torch.float32),
         }
+        sliced = split_batch(batch, torch.tensor([True, False, True]))
 
-        # 1. Uniform loss
-        loss, _ = compute_batch_loss(self.model.model, batch, unsupervised_weight=1.0)
-        self.assertTrue(loss.requires_grad)
+        assert sliced["img"].shape[0] == 2
+        assert sliced["bboxes"].shape[0] == 2
+        # batch_idx remapped from [0, 2] to [0, 1]
+        assert sliced["batch_idx"].tolist() == [0.0, 1.0]
+
+    @pytest.mark.parametrize("unsupervised_weight", [1.0, 0.5])
+    def test_compute_batch_loss_backward(self, student, unsupervised_weight):
+        batch = {
+            "img": torch.zeros(2, 3, 640, 640, dtype=torch.float32),
+            "bboxes": torch.tensor([[0.5, 0.5, 0.2, 0.2]], dtype=torch.float32),
+            "cls": torch.tensor([[0.0]], dtype=torch.float32),
+            "batch_idx": torch.tensor([0.0], dtype=torch.float32),
+            "is_pseudo": torch.tensor([False, True]),
+        }
+        loss, _ = compute_batch_loss(student, batch, unsupervised_weight=unsupervised_weight)
+        assert loss.requires_grad
         loss.backward()
-
-        # 2. Weighted loss
-        self.model.model.zero_grad()
-        loss_w, _ = compute_batch_loss(self.model.model, batch, unsupervised_weight=0.5)
-        self.assertTrue(loss_w.requires_grad)
-        loss_w.backward()
 
     def test_split_batch_slices_pl_weight(self):
         batch = {
@@ -138,10 +116,10 @@ class TestMeanTeacherLoss(unittest.TestCase):
         }
         sliced = split_batch(batch, torch.tensor([False, True, True]))
         torch.testing.assert_close(sliced["pl_weight"], torch.tensor([0.2, 0.3, 0.4]))
-        self.assertEqual(sliced["batch_idx"].tolist(), [0.0, 0.0, 1.0])
+        assert sliced["batch_idx"].tolist() == [0.0, 0.0, 1.0]
 
-    def test_weighted_loss_with_unsupervised_split(self):
-        configure_student_criterion(self.model.model)
+    def test_weighted_loss_with_unsupervised_split(self, student):
+        configure_student_criterion(student)
         batch = {
             "img": torch.zeros(2, 3, 640, 640),
             "bboxes": torch.tensor([[0.5, 0.5, 0.2, 0.2], [0.3, 0.3, 0.1, 0.1]]),
@@ -150,65 +128,47 @@ class TestMeanTeacherLoss(unittest.TestCase):
             "is_pseudo": torch.tensor([False, True]),
             "pl_weight": torch.tensor([1.0, 0.4]),
         }
-        loss, _ = compute_batch_loss(self.model.model, batch, unsupervised_weight=0.5)
-        self.assertTrue(torch.isfinite(loss))
+        loss, _ = compute_batch_loss(student, batch, unsupervised_weight=0.5)
+        assert torch.isfinite(loss)
         loss.backward()
 
-    def _mixed_batch(self) -> dict:
-        return {
-            "img": torch.zeros(3, 3, 640, 640),
-            "bboxes": torch.tensor(
-                [[0.5, 0.5, 0.2, 0.2], [0.3, 0.3, 0.1, 0.1], [0.6, 0.4, 0.2, 0.3], [0.4, 0.6, 0.2, 0.2]]
-            ),
-            "cls": torch.zeros(4, 1),
-            "batch_idx": torch.tensor([0.0, 1.0, 1.0, 2.0]),
-            "is_pseudo": torch.tensor([False, True, True]),
-            "pl_weight": torch.tensor([1.0, 0.5, 0.8, 1.0]),
-        }
-
-    def test_pl_cls_only_masks_pseudo_box_weights(self):
-        configure_student_criterion(self.model.model)
-        batch = self._mixed_batch()
-        loss, _ = compute_batch_loss(self.model.model, batch, pl_cls_only=True)
-        torch.testing.assert_close(batch["box_weight"], torch.tensor([1.0, 0.0, 0.0, 0.0]))
-        self.assertTrue(torch.isfinite(loss))
+    def test_pl_cls_only_masks_pseudo_box_weights(self, student, mixed_batch):
+        configure_student_criterion(student)
+        loss, _ = compute_batch_loss(student, mixed_batch, pl_cls_only=True)
+        torch.testing.assert_close(mixed_batch["box_weight"], torch.tensor([1.0, 0.0, 0.0, 0.0]))
+        assert torch.isfinite(loss)
         loss.backward()
 
-    def test_pl_cls_only_with_unsupervised_split(self):
-        configure_student_criterion(self.model.model)
-        batch = self._mixed_batch()
-        loss, _ = compute_batch_loss(
-            self.model.model, batch, unsupervised_weight=0.5, pl_cls_only=True
-        )
-        self.assertTrue(torch.isfinite(loss))
-        pseudo_half = split_batch(batch, batch["is_pseudo"])
+    def test_pl_cls_only_with_unsupervised_split(self, student, mixed_batch):
+        configure_student_criterion(student)
+        loss, _ = compute_batch_loss(student, mixed_batch, unsupervised_weight=0.5, pl_cls_only=True)
+        assert torch.isfinite(loss)
+        pseudo_half = split_batch(mixed_batch, mixed_batch["is_pseudo"])
         torch.testing.assert_close(pseudo_half["box_weight"], torch.zeros(3))
         torch.testing.assert_close(pseudo_half["pl_weight"], torch.tensor([0.5, 0.8, 1.0]))
 
-    def test_pl_cls_only_off_adds_no_box_weight(self):
-        configure_student_criterion(self.model.model)
-        batch = self._mixed_batch()
-        compute_batch_loss(self.model.model, batch)
-        self.assertNotIn("box_weight", batch)
+    def test_pl_cls_only_off_adds_no_box_weight(self, student, mixed_batch):
+        configure_student_criterion(student)
+        compute_batch_loss(student, mixed_batch)
+        assert "box_weight" not in mixed_batch
 
-    def test_configure_student_criterion_pins_e2e_gains(self):
-        criterion = configure_student_criterion(self.model.model)
-        self.assertIs(self.model.model.criterion, criterion)
+    def test_configure_student_criterion_pins_e2e_gains(self, student):
+        criterion = configure_student_criterion(student)
+        assert student.criterion is criterion
         # YOLO26 is end-to-end: gains must match the end of Ultralytics' decay schedule
-        self.assertAlmostEqual(criterion.o2m, criterion.final_o2m)
-        self.assertAlmostEqual(criterion.o2o, 1.0 - criterion.final_o2m)
-        self.assertGreater(criterion.o2o, criterion.o2m)
+        assert criterion.o2m == pytest.approx(criterion.final_o2m)
+        assert criterion.o2o == pytest.approx(1.0 - criterion.final_o2m)
+        assert criterion.o2o > criterion.o2m
 
 
-class TestCOCOMetrics(unittest.TestCase):
+class TestCOCOMetrics:
     """Test COCO prediction ID fixing and pycocotools evaluation."""
 
-    def setUp(self):
-        self.temp_dir = Path(tempfile.mkdtemp())
-        self.gt_json_path = self.temp_dir / "annotations.json"
-        self.pred_json_path = self.temp_dir / "predictions.json"
+    @pytest.fixture
+    def coco_files(self, tmp_path):
+        gt_path = tmp_path / "annotations.json"
+        pred_path = tmp_path / "predictions.json"
 
-        # Create minimal COCO ground truth
         coco_gt = {
             "images": [
                 {"id": 1, "file_name": "img_1.jpg", "width": 640, "height": 640},
@@ -216,82 +176,43 @@ class TestCOCOMetrics(unittest.TestCase):
             ],
             "categories": [{"id": 0, "name": "bottle"}],
             "annotations": [
-                {
-                    "id": 1,
-                    "image_id": 1,
-                    "category_id": 0,
-                    "bbox": [100, 100, 50, 50],
-                    "area": 2500,
-                    "iscrowd": 0,
-                },
-                {
-                    "id": 2,
-                    "image_id": 2,
-                    "category_id": 0,
-                    "bbox": [200, 200, 80, 80],
-                    "area": 6400,
-                    "iscrowd": 0,
-                },
+                {"id": 1, "image_id": 1, "category_id": 0, "bbox": [100, 100, 50, 50], "area": 2500, "iscrowd": 0},
+                {"id": 2, "image_id": 2, "category_id": 0, "bbox": [200, 200, 80, 80], "area": 6400, "iscrowd": 0},
             ],
         }
-        with open(self.gt_json_path, "w", encoding="utf-8") as f:
-            json.dump(coco_gt, f)
+        gt_path.write_text(json.dumps(coco_gt), encoding="utf-8")
 
-        # Create matching predictions
         preds = [
-            {
-                "image_id": 1,
-                "file_name": "img_1.jpg",
-                "category_id": 0,
-                "bbox": [102, 101, 48, 52],
-                "score": 0.95,
-            },
-            {
-                "image_id": 2,
-                "file_name": "img_2.jpg",
-                "category_id": 0,
-                "bbox": [198, 202, 82, 78],
-                "score": 0.88,
-            },
+            {"image_id": 1, "file_name": "img_1.jpg", "category_id": 0, "bbox": [102, 101, 48, 52], "score": 0.95},
+            {"image_id": 2, "file_name": "img_2.jpg", "category_id": 0, "bbox": [198, 202, 82, 78], "score": 0.88},
         ]
-        with open(self.pred_json_path, "w", encoding="utf-8") as f:
-            json.dump(preds, f)
+        pred_path.write_text(json.dumps(preds), encoding="utf-8")
+        return gt_path, pred_path
 
-    def tearDown(self):
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
+    def test_fix_prediction_ids(self, coco_files):
+        gt_path, pred_path = coco_files
+        fixed = fix_prediction_ids(pred_path, gt_path, default_category_id=0)
+        assert len(fixed) == 2
+        assert fixed[0]["image_id"] == 1
+        assert fixed[1]["image_id"] == 2
 
-    def test_fix_prediction_ids(self):
-        fixed = fix_prediction_ids(
-            self.pred_json_path, self.gt_json_path, default_category_id=0
-        )
-        self.assertEqual(len(fixed), 2)
-        self.assertEqual(fixed[0]["image_id"], 1)
-        self.assertEqual(fixed[1]["image_id"], 2)
+    def test_evaluate_coco(self, coco_files):
+        gt_path, pred_path = coco_files
+        metrics = evaluate_coco(coco_gt_path=gt_path, predictions_path=pred_path, default_category_id=0)
 
-    def test_evaluate_coco(self):
-        metrics = evaluate_coco(
-            coco_gt_path=self.gt_json_path,
-            predictions_path=self.pred_json_path,
-            default_category_id=0,
-        )
-
-        self.assertIn("mAP_50_95", metrics)
-        self.assertIn("mAP_50", metrics)
-        self.assertIn("mAP_s", metrics)
-        self.assertIn("mAP_m", metrics)
-        self.assertIn("mAP_l", metrics)
-        self.assertIn("peak_f1", metrics)
-        self.assertGreater(metrics["mAP_50"], 0.8)
-        self.assertGreater(metrics["peak_f1"], 0.8)
+        for key in ("mAP_50_95", "mAP_50", "mAP_s", "mAP_m", "mAP_l", "peak_f1"):
+            assert key in metrics
+        assert metrics["mAP_50"] > 0.8
+        assert metrics["peak_f1"] > 0.8
 
 
-class TestCOCOMultiClass(unittest.TestCase):
+class TestCOCOMultiClass:
     """Ultralytics' 1-based category ids map back to the GT's YOLO class ids."""
 
-    def setUp(self):
-        self.temp_dir = Path(tempfile.mkdtemp())
-        self.gt_path = self.temp_dir / "annotations.json"
-        self.pred_path = self.temp_dir / "predictions.json"
+    @pytest.fixture
+    def coco_files(self, tmp_path):
+        gt_path = tmp_path / "annotations.json"
+        pred_path = tmp_path / "predictions.json"
         gt = {
             "images": [{"id": 1, "file_name": "a.jpg", "width": 640, "height": 640}],
             "categories": [{"id": 0, "name": "glass"}, {"id": 1, "name": "metal"}],
@@ -300,78 +221,69 @@ class TestCOCOMultiClass(unittest.TestCase):
                 {"id": 2, "image_id": 1, "category_id": 1, "bbox": [200, 200, 60, 60], "area": 3600, "iscrowd": 0},
             ],
         }
-        self.gt_path.write_text(json.dumps(gt))
+        gt_path.write_text(json.dumps(gt))
         preds = [
             {"image_id": "a", "file_name": "a.jpg", "category_id": 1, "bbox": [10, 10, 50, 50], "score": 0.9},
             {"image_id": "a", "file_name": "a.jpg", "category_id": 2, "bbox": [200, 200, 60, 60], "score": 0.9},
             {"image_id": "a", "file_name": "a.jpg", "category_id": 8, "bbox": [400, 400, 20, 20], "score": 0.5},
         ]
-        self.pred_path.write_text(json.dumps(preds))
+        pred_path.write_text(json.dumps(preds))
+        return gt_path, pred_path
 
-    def tearDown(self):
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
+    def test_class_ids_mapped(self, coco_files):
+        gt_path, pred_path = coco_files
+        fixed = fix_prediction_ids(pred_path, gt_path, default_category_id=0)
+        assert [p["category_id"] for p in fixed] == [0, 1, 0]  # unknown id -> default
+        assert all(p["image_id"] == 1 for p in fixed)
 
-    def test_class_ids_mapped(self):
-        fixed = fix_prediction_ids(self.pred_path, self.gt_path, default_category_id=0)
-        self.assertEqual([p["category_id"] for p in fixed], [0, 1, 0])  # unknown id -> default
-        self.assertTrue(all(p["image_id"] == 1 for p in fixed))
+    def test_predictions_file_unchanged(self, coco_files):
+        gt_path, pred_path = coco_files
+        before = pred_path.read_text()
+        fix_prediction_ids(pred_path, gt_path)
+        evaluate_coco(gt_path, pred_path)
+        assert pred_path.read_text() == before
 
-    def test_predictions_file_unchanged(self):
-        before = self.pred_path.read_text()
-        fix_prediction_ids(self.pred_path, self.gt_path)
-        evaluate_coco(self.gt_path, self.pred_path)
-        self.assertEqual(self.pred_path.read_text(), before)
-
-    def test_multiclass_map(self):
-        metrics = evaluate_coco(self.gt_path, self.pred_path, default_category_id=0)
-        self.assertGreater(metrics["mAP_50"], 0.99)
+    def test_multiclass_map(self, coco_files):
+        gt_path, pred_path = coco_files
+        metrics = evaluate_coco(gt_path, pred_path, default_category_id=0)
+        assert metrics["mAP_50"] > 0.99
 
 
-class TestCOCOGroundTruthDiscovery(unittest.TestCase):
+def test_discover_coco_gt_prefers_dataset_annotations(tmp_path):
     """The dataset's own val annotations win over the FloW fallback next to its YAML."""
-
-    def test_prefers_dataset_annotations(self):
-        root = Path(tempfile.mkdtemp())
-        try:
-            for ds in ("flow_img", "ucwd"):
-                (root / ds / "val").mkdir(parents=True)
-                (root / ds / "val" / "annotations.json").write_text("{}")
-            yaml_path = root / "ucwd.yaml"
-            yaml_path.write_text(f"path: {root / 'ucwd'}\ntrain: train/images\nval: val/images\n")
-            self.assertEqual(discover_coco_gt_path(yaml_path), root / "ucwd" / "val" / "annotations.json")
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
+    for ds in ("flow_img", "ucwd"):
+        (tmp_path / ds / "val").mkdir(parents=True)
+        (tmp_path / ds / "val" / "annotations.json").write_text("{}")
+    yaml_path = tmp_path / "ucwd.yaml"
+    yaml_path.write_text(f"path: {tmp_path / 'ucwd'}\ntrain: train/images\nval: val/images\n")
+    assert discover_coco_gt_path(yaml_path) == tmp_path / "ucwd" / "val" / "annotations.json"
 
 
-class TestPseudoLabelTeacherRefresh(unittest.TestCase):
+class TestPseudoLabelTeacherRefresh:
     """The pseudo-labelling Teacher snapshot is refreshed every k epochs, starting at the first."""
 
     def test_every_epoch_by_default(self):
-        self.assertTrue(all(pl_teacher_due(epoch, 1) for epoch in range(10)))
+        assert all(pl_teacher_due(epoch, 1) for epoch in range(10))
 
-    def test_every_k_epochs(self):
-        self.assertEqual([e for e in range(10) if pl_teacher_due(e, 3)], [0, 3, 6, 9])
-        self.assertEqual([e for e in range(15) if pl_teacher_due(e, 8)], [0, 8])
-
-
-class TestMeanTeacherIntegration(unittest.TestCase):
-    """Integration test verifying MeanTeacherConfig and dataset orchestration."""
-
-    def test_config_initialization(self):
-        cfg = MeanTeacherConfig(
-            model_name="yolo26n.pt",
-            warmup_epochs=5,
-            ssl_epochs=20,
-            batch_size=8,
-            ema_decay=0.999,
-            unsupervised_weight=0.75,
-        )
-        self.assertEqual(cfg.warmup_epochs, 5)
-        self.assertEqual(cfg.ssl_epochs, 20)
-        self.assertEqual(cfg.batch_size, 8)
-        self.assertEqual(cfg.ema_decay, 0.999)
-        self.assertEqual(cfg.unsupervised_weight, 0.75)
+    @pytest.mark.parametrize(
+        ("epochs", "k", "expected"),
+        [(10, 3, [0, 3, 6, 9]), (15, 8, [0, 8])],
+    )
+    def test_every_k_epochs(self, epochs, k, expected):
+        assert [e for e in range(epochs) if pl_teacher_due(e, k)] == expected
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_mean_teacher_config_initialization():
+    cfg = MeanTeacherConfig(
+        model_name="yolo26n.pt",
+        warmup_epochs=5,
+        ssl_epochs=20,
+        batch_size=8,
+        ema_decay=0.999,
+        unsupervised_weight=0.75,
+    )
+    assert cfg.warmup_epochs == 5
+    assert cfg.ssl_epochs == 20
+    assert cfg.batch_size == 8
+    assert cfg.ema_decay == 0.999
+    assert cfg.unsupervised_weight == 0.75
