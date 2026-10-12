@@ -438,6 +438,118 @@ Questions, compared on mean ± standard deviation over seeds:
 global Python/NumPy/PyTorch RNGs that drive augmentation and DataLoader workers. The seed-42 runs
 predate the global seeding, so they're independent samples, not exact repeats. Expect about 3 h.
 
+### Batches with input-scale size bins
+
+Every batch above bins pseudo-labels in original image pixels (pinned with `LEGACY_SIZE_BINS`).
+The batches below use the trainer default, size bins at the network input scale, and are the ones
+the thesis results rest on. Single-seed differences under ~0.005 mAP50-95 were noise above, so
+the FloW batches repeat every configuration with seeds 42, 43 and 44 (seed-major order: a
+complete seed finishes first).
+
+#### `loo-seeds`: leave-one-out over three seeds
+
+Output: `runs/mean_teacher/ablation-loo-seeds/`. From the pipeline's own warm-up (untuned,
+0.431), like `mechanisms` and `add-one-in`. The GT-only control starts from the same weights and
+takes as many optimizer steps with the same Teacher EMA, so `final` − `gt-only` is the gain from
+pseudo-labels rather than from extra fine-tuning.
+
+| Config | Change from `final` |
+|---|---|
+| `final` | — (cap 2,400, soft weights, size bins, multi-view, GT tail, EMA 0.9996) |
+| `no-multi-view` | normal view only |
+| `no-size-bins` | one shared threshold |
+| `no-soft-weights` | hard pseudo-labels |
+| `no-gt-tail` | `--tail-ratio 0` |
+| `fast-ema` | Teacher EMA 0.999 |
+| `gt-only` | no pseudo-labels, 2,400-matched steps |
+
+21 runs, about 9 h.
+
+#### `tuned-seeds`: SSL on top of the tuned supervised model
+
+Output: `runs/mean_teacher/ablation-tuned-seeds/`. `final` and `gt-only` over the same three seeds
+from the hyperparameter-tuned YOLO26m (0.448). The tuned model is the external reference for what
+standard supervised training reaches; this batch asks whether SSL still adds anything on top of
+it. 6 runs, about 2.5 h.
+
+#### `ucwd`: UCWD baseline at imgsz 640
+
+Output: `runs/mean_teacher/ablation-ucwd/`. UCWD is coastal UAV litter with 7 classes, so the
+baseline is trained from `yolo26m.pt` on `data/ucwd.yaml`. imgsz 1280 was dropped: on a 12 GB GPU
+batch 16 runs out of memory and batch 8 spills into shared memory, about 10× slower.
+
+| Step | What |
+|---|---|
+| `100pct-warmup` | supervised baseline on all 3,071 train images, 50 epochs |
+| `25pct-warmup` | supervised on a fixed 25% subset (768 images), same 9,600-step budget (200 epochs) |
+| `25pct-ssl` | Mean Teacher from `25pct-warmup`; the other 75% of the train split (2,303 images, symlinked into `data/ucwd/unlabeled_75pct/`) is the unlabeled pool and is pseudo-labelled in full each epoch; GT head repeated 2× so pseudo-labels are about the same share of an epoch as in the FloW final runs |
+| `25pct-gt-only` | control from `25pct-warmup`, step-matched (`--gt-repeat 6`) |
+
+The subset and pool files are written on first use (`data/ucwd/splits/`, `data/ucwd_25pct.yaml`,
+`data/ucwd/unlabeled_75pct/`) and kept, so re-runs use the same split. Expect about 8 h, mostly
+the two warm-ups.
+
+#### Results of `loo-seeds`, `tuned-seeds` and `ucwd`
+
+COCO mAP50-95, mean ± sample std over seeds 42–44; "late" is the mean of epochs 8–15. With three
+seeds the standard error of a difference of means is about 0.0015, so differences under ~0.003
+are not resolved.
+
+`loo-seeds` (start 0.431):
+
+| Config | Best | Late | Final |
+|---|---|---|---|
+| final | 0.4429 ± 0.0019 | 0.4419 ± 0.0016 | 0.4423 ± 0.0024 |
+| no-multi-view | 0.4442 ± 0.0014 | 0.4435 ± 0.0012 | 0.4437 ± 0.0013 |
+| no-size-bins | 0.4418 ± 0.0030 | 0.4403 ± 0.0028 | 0.4395 ± 0.0026 |
+| no-soft-weights | 0.4447 ± 0.0033 | 0.4434 ± 0.0033 | 0.4420 ± 0.0039 |
+| no-gt-tail | 0.4430 ± 0.0017 | 0.4419 ± 0.0019 | 0.4412 ± 0.0021 |
+| fast-ema | 0.4439 ± 0.0020 | 0.4390 ± 0.0023 | 0.4336 ± 0.0023 |
+| gt-only | 0.4383 ± 0.0013 | 0.4376 ± 0.0018 | 0.4368 ± 0.0025 |
+
+- **SSL beats the step-matched control by +0.004 (late) / +0.006 (final),** several times the
+  seed spread: a small but reproducible gain.
+- **The slow Teacher is the only component with a clear effect:** with EMA 0.999 the peak is the
+  same but the run drifts down (−0.009 at the last epoch).
+- **Size bins: at most a weak effect** (−0.002 late / −0.003 final without them, about one std).
+- **Multi-view, soft weights and the GT tail add nothing measurable;** without the first two the
+  means are even slightly higher, within noise.
+
+`tuned-seeds` (start 0.448):
+
+| Config | Best | Late | Final |
+|---|---|---|---|
+| final | 0.4605 ± 0.0039 | 0.4491 ± 0.0064 | 0.4432 ± 0.0058 |
+| gt-only | 0.4606 ± 0.0047 | 0.4584 ± 0.0037 | 0.4569 ± 0.0010 |
+
+On top of the tuned model SSL adds nothing: it peaks early (epochs 3–5) at the control's level,
+then falls below it (−0.009 late, −0.014 final). The control's own rise from 0.448 to 0.458 comes
+from extra fine-tuning with the EMA-averaged Teacher, not from pseudo-labels.
+
+`ucwd` (single seed, 25% of the labels unless noted):
+
+| Run | Best | Late | Final | mAP50 (final) |
+|---|---|---|---|---|
+| supervised 25% (start) | — | — | 0.4912 | 0.749 |
+| Mean Teacher | 0.509 (epoch 9) | 0.5061 | 0.5017 | 0.761 |
+| gt-only | 0.502 (epoch 8) | 0.4997 | 0.4954 | 0.752 |
+| supervised 100% | — | — | 0.5803 | 0.854 |
+
+SSL is ahead of its control by about +0.006 (one seed), closing under 10% of the 25%→100% gap.
+COCO `mAP_s` is not meaningful on UCWD: only 1% of the boxes are small in original pixels.
+
+The best epoch is selected on the same val split it is reported on, so it is optimistic; prefer
+the late mean or the final epoch when reporting.
+
+**COCO metrics on UCWD were repaired after the runs.** Ultralytics writes class index + 1 as
+`category_id` for non-COCO datasets, and the evaluation kept those ids as they were, so every
+multi-class prediction was matched against the wrong class (UCWD COCO mAP ≈ 0.001). FloW is
+single-class and was not affected. `metrics.py` now maps the ids back and no longer rewrites
+`predictions.json`; the peak F1 uses the class-averaged precision-recall curve. The UCWD runs'
+`coco/*` columns were recomputed from their saved per-epoch predictions
+(`runs/mean_teacher/ablation-ucwd/fix_coco_metrics.py`; originals kept as
+`results.before_coco_fix.csv`), and the full-label warm-up was evaluated into `eval_best.csv`.
+
 ## Exporting results for the thesis
 
 ```bash
@@ -461,6 +573,9 @@ mAP50-95 quoted in this README by about ±0.001.
 | `ssod_components.csv`, `ssod_components_curves.csv` | The `components` batch, including the change from `final`. |
 | `ssod_mechanisms.csv`, `ssod_mechanisms_curves.csv` | The `mechanisms` batch with its `final` and `gt-only` references, including the change from `final`. |
 | `ssod_add_one_in.csv`, `ssod_add_one_in_curves.csv` | The `add-one-in` batch with its references, including the change from `minimal`. |
+| `ssod_loo_seed_runs.csv`, `ssod_loo_seed_summary.csv`, `ssod_loo_seed_curves.csv` | `loo-seeds`: one row per seed run, mean ± std per configuration with differences from `final` and `gt-only`, and per-epoch curves. |
+| `ssod_tuned_seed_runs.csv`, `ssod_tuned_seed_summary.csv`, `ssod_tuned_seed_curves.csv` | The same for `tuned-seeds`, with differences from `gt-only`. |
+| `ssod_ucwd.csv`, `ssod_ucwd_curves.csv` | UCWD: supervised 25% and 100%, Mean Teacher and GT-only control on 25% (COCO metrics), and per-epoch curves. |
 | `ssod_seed_runs.csv`, `ssod_seed_summary.csv` | One row per seed run of `final`, `simple`, `minimal` and `gt-only` (best-epoch metrics, late mean, final), and their mean and standard deviation per configuration. |
 | `ssod_architectures.csv` | Supervised, GT-only control and each cap for YOLO26m, YOLO11m and YOLO12m. |
 | `ssod_label_fractions.csv` | Supervised, GT-only control and SSL at 10/25/50/100% labels, for both caps. |

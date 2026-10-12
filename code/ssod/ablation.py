@@ -20,6 +20,13 @@ Batches:
   architectures-control  GT-only control per architecture (runs/mean_teacher/ablation-architectures-control)
   fractions-2400         fractions on the final 2,400 cap, reusing the fractions warm-ups (runs/mean_teacher/ablation-fractions-2400)
   components             leave-one-out of the final configuration from the tuned YOLO26m (runs/mean_teacher/ablation-components)
+  mechanisms, add-one-in, seeds  see ABLATION.md
+  loo-seeds              leave-one-out of every component x seeds 42-44, pipeline warm-up (runs/mean_teacher/ablation-loo-seeds)
+  tuned-seeds            final and GT-only control x seeds 42-44 from the tuned YOLO26m (runs/mean_teacher/ablation-tuned-seeds)
+  ucwd                   UCWD at imgsz 640: supervised warm-up on all labels; SSL vs. control on 25% (runs/mean_teacher/ablation-ucwd)
+
+Batches up to fractions-2400 bin pseudo-labels in original pixels (pinned); later ones use the
+input-scale default.
 
 Usage:
   uv run python code/ssod/ablation.py                  # batch "settle"
@@ -72,6 +79,7 @@ class Warmup:
     epochs: int
     model: str = WARMUP_MODEL
     root: Path | None = None
+    data: Path = GT_DATA_YAML  # GT dataset YAML the subset is drawn from
 
 
 @dataclass
@@ -84,6 +92,10 @@ class Batch:
     warmups: dict[str, Warmup] = field(default_factory=dict)
     run_warmup: dict[str, str] = field(default_factory=dict)  # run -> warm-up name
     warmup_weights: Path | None = None  # batch-wide starting weights (overrides the default)
+    # Runs on a GT subset use the rest of that dataset's train split as their unlabeled pool
+    # (instead of the default FloW video frames)
+    unlabeled_rest: bool = False
+    baseline_warmups: list[str] = field(default_factory=list)  # warm-ups trained even without runs
 
 
 def matched_gt_repeat(
@@ -100,10 +112,12 @@ def matched_gt_repeat(
     return max(1, round((ssl_epoch - tail) / head))
 
 
-def warmup_epochs(fraction: float) -> int:
+def warmup_epochs(
+    fraction: float, train_images: int = GT_TRAIN_IMAGES, step_budget: int = WARMUP_STEPS
+) -> int:
     """Epochs giving every warm-up the same optimizer-step budget as the full-label one."""
-    steps_per_epoch = max(1, -(-round(GT_TRAIN_IMAGES * fraction) // 16))
-    return round(WARMUP_STEPS / steps_per_epoch)
+    steps_per_epoch = max(1, -(-round(train_images * fraction) // 16))
+    return round(step_budget / steps_per_epoch)
 
 
 # Historic batches pin every setting whose trainer default has since changed (EMA 0.999 -> 0.9996,
@@ -403,6 +417,89 @@ for _batch in BATCHES.values():
     for _run, _args in _batch.runs.items():
         _batch.runs[_run] = [*_args, *LEGACY_SIZE_BINS]
 
+# ---- Batches with input-scale size bins ----------------------------------------------------
+
+SEEDS = (42, 43, 44)
+GT_ONLY_2400 = [
+    "--pl-images-per-epoch", "0",
+    "--ema-decay", "0.9996",
+    "--gt-repeat", str(matched_gt_repeat(GT_TRAIN_IMAGES, pl_images=CAP_2400_PL_IMAGES)),
+]
+
+
+def seeded(configs: dict[str, list[str]], seeds: tuple[int, ...] = SEEDS) -> dict[str, list[str]]:
+    """Every configuration once per seed, seed-major so a complete seed finishes first."""
+    return {
+        f"{name}-seed{seed}": [*args, "--seed", str(seed)]
+        for seed in seeds
+        for name, args in configs.items()
+    }
+
+
+# Leave-one-out of every component of the final configuration over three seeds, from the
+# pipeline's own warm-up. The GT-only control (same start, steps and Teacher EMA, no
+# pseudo-labels) separates the SSL gain from extra fine-tuning.
+LOO_CONFIGS = {
+    "final": FINAL_SSL,
+    "no-multi-view": [*FINAL_SSL, "--no-pl-multi-view"],
+    "no-size-bins": [*FINAL_SSL, "--no-pl-size-bins"],
+    "no-soft-weights": ["--pl-images-per-epoch", "2400", "--no-pl-soft-weights", "--ema-decay", "0.9996"],
+    "no-gt-tail": [*FINAL_SSL, "--tail-ratio", "0"],
+    "fast-ema": ["--pl-images-per-epoch", "2400", "--pl-soft-weights", "--ema-decay", "0.999"],
+    "gt-only": GT_ONLY_2400,
+}
+BATCHES["loo-seeds"] = Batch(
+    project=Path("runs/mean_teacher/ablation-loo-seeds"),
+    runs=seeded(LOO_CONFIGS),
+)
+
+# The final configuration and its control from the tuned supervised YOLO26m: does SSL add
+# anything on top of the strongest supervised model?
+BATCHES["tuned-seeds"] = Batch(
+    project=Path("runs/mean_teacher/ablation-tuned-seeds"),
+    runs=seeded({"final": FINAL_SSL, "gt-only": GT_ONLY_2400}),
+    warmup_weights=TUNED_WARMUP_WEIGHTS,
+)
+
+# UCWD (coastal UAV litter, 7 classes) baseline at imgsz 640: the supervised warm-up on all labels,
+# and Mean Teacher vs. its GT-only control on 25% of the labels, with the other 75% of the train
+# images as the unlabeled pool (all of it pseudo-labelled each epoch). GT is repeated twice so
+# pseudo-labelled images make up about the same share of an epoch as in the FloW final runs.
+UCWD_DATA_YAML = Path("data/ucwd.yaml")
+UCWD_TRAIN_IMAGES = 3071
+UCWD_WARMUP_STEPS = 50 * -(-UCWD_TRAIN_IMAGES // 16)  # 50 epochs on all labels (batch 16)
+UCWD_PROJECT = Path("runs/mean_teacher/ablation-ucwd")
+UCWD_FRACTION = 0.25
+UCWD_GT = round(UCWD_TRAIN_IMAGES * UCWD_FRACTION)
+UCWD_POOL = UCWD_TRAIN_IMAGES - UCWD_GT
+UCWD_SSL_GT_REPEAT = 2
+BATCHES["ucwd"] = Batch(
+    project=UCWD_PROJECT,
+    runs={
+        "25pct-ssl": [
+            "--pl-images-per-epoch", "-1", "--pl-soft-weights", "--ema-decay", "0.9996",
+            "--gt-repeat", str(UCWD_SSL_GT_REPEAT),
+        ],
+        "25pct-gt-only": [
+            "--pl-images-per-epoch", "0",
+            "--ema-decay", "0.9996",
+            "--gt-repeat", str(matched_gt_repeat(UCWD_GT, UCWD_SSL_GT_REPEAT, pl_images=UCWD_POOL)),
+        ],
+    },
+    warmups={
+        "100pct-warmup": Warmup(fraction=1.0, epochs=50, data=UCWD_DATA_YAML),
+        "25pct-warmup": Warmup(
+            fraction=UCWD_FRACTION,
+            epochs=warmup_epochs(UCWD_FRACTION, UCWD_TRAIN_IMAGES, UCWD_WARMUP_STEPS),
+            data=UCWD_DATA_YAML,
+        ),
+    },
+    run_warmup={"25pct-ssl": "25pct-warmup", "25pct-gt-only": "25pct-warmup"},
+    unlabeled_rest=True,
+    baseline_warmups=["100pct-warmup"],
+    references={"100pct-supervised (warm-up)": UCWD_PROJECT / "100pct-warmup"},
+)
+
 SUMMARY_FIELDS = [
     "run",
     "epochs_done",
@@ -493,33 +590,53 @@ def format_table(table: list[dict[str, str]]) -> str:
     return "\n".join(lines)
 
 
-def subset_paths(fraction: float) -> tuple[Path | None, Path]:
-    """Image-list and data-YAML paths for a GT train subset (the base YAML for the full split)."""
+def dataset_config(data_yaml: Path) -> dict:
+    with open(data_yaml, encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def train_images(data_yaml: Path) -> list[Path]:
+    """Sorted image files of a dataset's train split."""
+    config = dataset_config(data_yaml)
+    train_dir = Path(config["path"]) / config["train"]
+    return sorted(p for p in train_dir.iterdir() if p.suffix.lower() in VALID_IMAGE_EXTS)
+
+
+def subset_paths(fraction: float, data_yaml: Path = GT_DATA_YAML) -> tuple[Path | None, Path]:
+    """
+    Image-list and data-YAML paths for a GT train subset (the base YAML for the full split):
+    <dataset root>/splits/train_<pct>pct.txt and <base YAML stem>_<pct>pct.yaml next to the base.
+    """
+    data_yaml = data_yaml.resolve()
     if fraction >= 1.0:
-        return None, GT_DATA_YAML.resolve()
+        return None, data_yaml
     pct = round(fraction * 100)
-    base_root = GT_DATA_YAML.resolve().parent
-    return base_root / "flow_img" / "splits" / f"train_{pct}pct.txt", base_root / f"flow_img_{pct}pct.yaml"
+    root = Path(dataset_config(data_yaml)["path"])
+    return root / "splits" / f"train_{pct}pct.txt", data_yaml.parent / f"{data_yaml.stem}_{pct}pct.yaml"
 
 
-def ensure_subset(fraction: float, logger) -> Path:
+def subset_images(fraction: float, data_yaml: Path = GT_DATA_YAML) -> list[Path]:
     """
-    Write a nested random subset of the GT train images (a prefix of one fixed permutation, so
-    10% is contained in 25%, which is contained in 50%) and a data YAML pointing at it. The val
-    split is unchanged. Existing files are kept, so subsets stay fixed across re-runs.
+    Nested random subset of the train images: a prefix of one fixed permutation, so 10% is
+    contained in 25%, which is contained in 50%.
     """
-    list_path, yaml_path = subset_paths(fraction)
+    images = train_images(data_yaml)
+    order = np.random.default_rng(SUBSET_SEED).permutation(len(images))
+    return sorted(images[i] for i in order[: round(len(images) * fraction)])
+
+
+def ensure_subset(fraction: float, logger, data_yaml: Path = GT_DATA_YAML) -> Path:
+    """
+    Write a GT train subset (see `subset_images`) and a data YAML pointing at it. The val split
+    is unchanged. Existing files are kept, so subsets stay fixed across re-runs.
+    """
+    list_path, yaml_path = subset_paths(fraction, data_yaml)
     if list_path is None or (list_path.is_file() and yaml_path.is_file()):
         return yaml_path
 
-    with open(GT_DATA_YAML, encoding="utf-8") as f:
-        base = yaml.safe_load(f)
+    base = dataset_config(data_yaml)
     root = Path(base["path"])
-    images = sorted(
-        p for p in (root / base["train"]).iterdir() if p.suffix.lower() in VALID_IMAGE_EXTS
-    )
-    order = np.random.default_rng(SUBSET_SEED).permutation(len(images))
-    chosen = sorted(images[i] for i in order[: round(len(images) * fraction)])
+    chosen = subset_images(fraction, data_yaml)
 
     list_path.parent.mkdir(parents=True, exist_ok=True)
     list_path.write_text("".join(f"{p.resolve()}\n" for p in chosen), encoding="utf-8")
@@ -533,6 +650,33 @@ def ensure_subset(fraction: float, logger) -> Path:
         f"Wrote GT subset {fraction:.0%}: {len(chosen)} images, {n_boxes} boxes -> {yaml_path}"
     )
     return yaml_path
+
+
+def rest_pool_paths(fraction: float, data_yaml: Path) -> tuple[Path, Path]:
+    """Images and pseudo-label directories of the train images left out of a GT subset."""
+    rest = Path(dataset_config(data_yaml.resolve())["path"]) / f"unlabeled_{100 - round(fraction * 100)}pct"
+    return rest / "images", rest / "labels"
+
+
+def ensure_rest_pool(fraction: float, data_yaml: Path, logger) -> tuple[Path, Path]:
+    """
+    Unlabeled pool for SSL on a GT subset: symlinks to the train images outside the subset (their
+    GT labels are never read). Pseudo-labels are written to the pool's own labels directory.
+    """
+    images_dir, labels_dir = rest_pool_paths(fraction, data_yaml)
+    subset = {p.name for p in subset_images(fraction, data_yaml)}
+    rest = [p for p in train_images(data_yaml) if p.name not in subset]
+    if images_dir.is_dir() and len(list(images_dir.iterdir())) == len(rest):
+        return images_dir, labels_dir
+
+    images_dir.mkdir(parents=True, exist_ok=True)
+    labels_dir.mkdir(parents=True, exist_ok=True)
+    for image in rest:
+        link = images_dir / image.name
+        if not link.exists():
+            link.symlink_to(image.resolve())
+    logger.info(f"Unlabeled pool: {len(rest)} train images outside the {fraction:.0%} subset -> {images_dir}")
+    return images_dir, labels_dir
 
 
 def run_subprocess(cmd: list[str], log_path: Path, name: str, logger) -> int:
@@ -562,7 +706,11 @@ def ensure_warmup(name: str, spec: Warmup, project: Path, dry_run: bool, logger)
         logger.info(f"[{name}] warm-up already complete, skipping.")
         return best
 
-    yaml_path = subset_paths(spec.fraction)[1] if dry_run else ensure_subset(spec.fraction, logger)
+    yaml_path = (
+        subset_paths(spec.fraction, spec.data)[1]
+        if dry_run
+        else ensure_subset(spec.fraction, logger, spec.data)
+    )
     last = warmup_dir / "weights" / "last.pt"
     if last.is_file():
         cmd = [str(YOLO_CLI), "detect", "train", "resume", f"model={last}"]
@@ -593,6 +741,21 @@ def ensure_warmup(name: str, spec: Warmup, project: Path, dry_run: bool, logger)
     done_marker.touch()
     logger.info(f"[{name}] warm-up finished in {(time.time() - started) / 3600:.1f} h.")
     return best
+
+
+def data_args(spec: Batch, warmup: Warmup, dry_run: bool, logger) -> list[str]:
+    """Trainer flags for the GT data (and unlabeled pool) of a run trained from `warmup`."""
+    if warmup.fraction >= 1.0 and warmup.data == GT_DATA_YAML:
+        return []
+    args = ["--gt-yaml", str(subset_paths(warmup.fraction, warmup.data)[1])]
+    if spec.unlabeled_rest and warmup.fraction < 1.0:
+        pool = (
+            rest_pool_paths(warmup.fraction, warmup.data)
+            if dry_run
+            else ensure_rest_pool(warmup.fraction, warmup.data, logger)
+        )
+        args += ["--pl-images", str(pool[0]), "--pl-labels", str(pool[1])]
+    return args
 
 
 @app.command()
@@ -645,6 +808,12 @@ def main(
         f"Ablation batch {batch!r}: runs={runs}, epochs={epochs}, warmup={warmup_weights}, project={project}"
     )
 
+    for name in spec.baseline_warmups:
+        try:
+            ensure_warmup(name, spec.warmups[name], project, dry_run, logger)
+        except RuntimeError as e:
+            logger.error(str(e))
+
     for run in runs:
         run_dir = project / run
         done = completed_epochs(run_dir)
@@ -664,8 +833,7 @@ def main(
             except RuntimeError as e:
                 logger.error(f"{e}. Skipping {run}.")
                 continue
-            if warmup_spec.fraction < 1.0:
-                run_data_args = ["--gt-yaml", str(subset_paths(warmup_spec.fraction)[1])]
+            run_data_args = data_args(spec, warmup_spec, dry_run, logger)
 
         cmd = [sys.executable, str(MEAN_TEACHER_SCRIPT)]
         if (run_dir / "weights" / "paused.pt").is_file() or (

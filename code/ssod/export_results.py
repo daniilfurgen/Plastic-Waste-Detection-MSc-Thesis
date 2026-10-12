@@ -144,6 +144,23 @@ SEED_RUNS: dict[str, list[tuple[str, Path]]] = {
 for _config, _runs in SEED_RUNS.items():
     _runs += [(str(seed), MT / f"ablation-seeds/{_config}-seed{seed}") for seed in (43, 44)]
 
+# Batches with input-scale size bins over seeds 42-44 (see ABLATION.md).
+SEEDS = ("42", "43", "44")
+LOO_CONFIGS = ["final", "no-multi-view", "no-size-bins", "no-soft-weights", "no-gt-tail", "fast-ema", "gt-only"]
+LOO_SEED_RUNS: dict[str, list[tuple[str, Path]]] = {
+    config: [(seed, MT / f"ablation-loo-seeds/{config}-seed{seed}") for seed in SEEDS]
+    for config in LOO_CONFIGS
+}
+TUNED_SEED_RUNS: dict[str, list[tuple[str, Path]]] = {
+    config: [(seed, MT / f"ablation-tuned-seeds/{config}-seed{seed}") for seed in SEEDS]
+    for config in ("final", "gt-only")
+}
+UCWD = MT / "ablation-ucwd"
+UCWD_RUNS = [
+    Run("25pct-ssl", UCWD / "25pct-ssl", pl_cap=2303),
+    Run("25pct-gt-only", UCWD / "25pct-gt-only", pl_cap=0, soft_weights=False),
+]
+
 # Long runs before the ablation (50-100 epochs) that show the original degradation.
 LONG_RUNS = [
     Run("v2-pre-fix", MT / "ssod-v2-100", pl_cap=FULL_POOL, soft_weights=False, ema=0.999,
@@ -157,7 +174,8 @@ def load(run: Run) -> pl.DataFrame | None:
     if not results.is_file():
         logger.warning(f"Missing {results}; skipping {run.run_id}.")
         return None
-    return pl.read_csv(results)
+    # A run restarted before its first epoch finished logs epoch 0 again; keep the latest record
+    return pl.read_csv(results).unique(subset="epoch", keep="last", maintain_order=True)
 
 
 def settings(run: Run) -> dict[str, object]:
@@ -356,10 +374,10 @@ def with_deltas(runs: list[Run], reference: str = "final") -> pl.DataFrame:
     )
 
 
-def seed_runs() -> pl.DataFrame:
+def seed_runs(groups: dict[str, list[tuple[str, Path]]]) -> pl.DataFrame:
     """One row per seed run: mAP50-95 summary plus size and localisation metrics at the best epoch."""
     rows = []
-    for config, runs in SEED_RUNS.items():
+    for config, runs in groups.items():
         for seed, path in runs:
             df = load(Run(f"{config}-seed{seed}", path))
             if df is None:
@@ -372,12 +390,15 @@ def seed_runs() -> pl.DataFrame:
     return pl.DataFrame(rows)
 
 
-def seed_summary(runs: pl.DataFrame) -> pl.DataFrame:
-    """Mean and sample standard deviation over seeds for each configuration."""
+def seed_summary(runs: pl.DataFrame, references: tuple[str, ...] = ()) -> pl.DataFrame:
+    """
+    Mean and sample standard deviation over seeds for each configuration, plus the difference of
+    the late and final means from each configuration in `references` (e.g. final, gt-only).
+    """
     if runs.is_empty():
         return runs
     metrics = ["best", "late_mean", "final", "best_map75", "best_map_s", "best_map_m"]
-    return (
+    summary = (
         runs.group_by("config", maintain_order=True)
         .agg(
             pl.len().alias("n"),
@@ -385,6 +406,60 @@ def seed_summary(runs: pl.DataFrame) -> pl.DataFrame:
             *[pl.col(m).std().round(4).alias(f"{m}_std") for m in metrics],
         )
     )
+    for reference in references:
+        ref = summary.filter(pl.col("config") == reference)
+        if ref.is_empty():
+            continue
+        ref_row = ref.row(0, named=True)
+        suffix = reference.replace("-", "_")
+        summary = summary.with_columns(
+            (pl.col("late_mean_mean") - ref_row["late_mean_mean"]).round(4).alias(f"delta_late_vs_{suffix}"),
+            (pl.col("final_mean") - ref_row["final_mean"]).round(4).alias(f"delta_final_vs_{suffix}"),
+        )
+    return summary
+
+
+def seed_curves(groups: dict[str, list[tuple[str, Path]]]) -> pl.DataFrame:
+    """Per-epoch metrics of every seed run, with config and seed columns."""
+    frames = []
+    for config, runs in groups.items():
+        for seed, path in runs:
+            df = curves([Run(f"{config}-seed{seed}", path, variant=config)])
+            if not df.is_empty():
+                frames.append(df.with_columns(config=pl.lit(config), seed=pl.lit(seed)))
+    return pl.concat(frames) if frames else pl.DataFrame()
+
+
+def ucwd() -> pl.DataFrame:
+    """
+    UCWD at imgsz 640: the supervised warm-ups on 25% (epoch 0 of the SSL run) and 100% of the
+    labels, and Mean Teacher vs. its GT-only control on 25%. COCO metrics on the val split.
+    """
+    rows = []
+    for run in UCWD_RUNS:
+        df = load(run)
+        if df is None:
+            continue
+        stats = run_stats(df)
+        final = df.filter(pl.col("epoch") > 0).row(-1, named=True)
+        if not rows:
+            supervised = df.filter(pl.col("epoch") == 0).row(0, named=True)
+            rows.append({"label_pct": 25, "method": "supervised", "final": stats["supervised"],
+                         "late_mean": None, "best": None, "best_epoch": None,
+                         **metric_row(supervised, METRICS)})
+        rows.append({"label_pct": 25, "method": run.run_id.removeprefix("25pct-"),
+                     **{k: stats[k] for k in ("final", "late_mean", "best", "best_epoch")},
+                     **metric_row(final, METRICS)})
+    full = UCWD / "100pct-warmup" / "eval_best.csv"
+    if full.is_file():
+        best = pl.read_csv(full).row(0, named=True)
+        rows.append({"label_pct": 100, "method": "supervised",
+                     "final": round(float(best["coco/mAP_50_95"]), 4),
+                     "late_mean": None, "best": None, "best_epoch": None,
+                     **metric_row(best, METRICS)})
+    else:
+        logger.warning(f"Missing {full}; skipping the full-label UCWD baseline.")
+    return pl.DataFrame(rows)
 
 
 @app.command()
@@ -404,9 +479,19 @@ def main(
     write(curves(MECHANISM_RUNS), out_dir, "ssod_mechanisms_curves.csv")
     write(with_deltas(ADD_ONE_IN_RUNS, reference="minimal"), out_dir, "ssod_add_one_in.csv")
     write(curves(ADD_ONE_IN_RUNS), out_dir, "ssod_add_one_in_curves.csv")
-    seeds = seed_runs()
+    seeds = seed_runs(SEED_RUNS)
     write(seeds, out_dir, "ssod_seed_runs.csv")
     write(seed_summary(seeds), out_dir, "ssod_seed_summary.csv")
+    loo = seed_runs(LOO_SEED_RUNS)
+    write(loo, out_dir, "ssod_loo_seed_runs.csv")
+    write(seed_summary(loo, references=("final", "gt-only")), out_dir, "ssod_loo_seed_summary.csv")
+    write(seed_curves(LOO_SEED_RUNS), out_dir, "ssod_loo_seed_curves.csv")
+    tuned = seed_runs(TUNED_SEED_RUNS)
+    write(tuned, out_dir, "ssod_tuned_seed_runs.csv")
+    write(seed_summary(tuned, references=("gt-only",)), out_dir, "ssod_tuned_seed_summary.csv")
+    write(seed_curves(TUNED_SEED_RUNS), out_dir, "ssod_tuned_seed_curves.csv")
+    write(ucwd(), out_dir, "ssod_ucwd.csv")
+    write(curves(UCWD_RUNS), out_dir, "ssod_ucwd_curves.csv")
     write(architectures(), out_dir, "ssod_architectures.csv")
     write(label_fractions(), out_dir, "ssod_label_fractions.csv")
 

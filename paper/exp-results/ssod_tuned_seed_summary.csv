@@ -1,0 +1,3 @@
+config,n,best_mean,late_mean_mean,final_mean,best_map75_mean,best_map_s_mean,best_map_m_mean,best_std,late_mean_std,final_std,best_map75_std,best_map_s_std,best_map_m_std,delta_late_vs_gt_only,delta_final_vs_gt_only
+final,3,0.4605,0.4491,0.4432,0.4069,0.317,0.6005,0.0039,0.0064,0.0058,0.0098,0.002,0.0059,-0.0093,-0.0137
+gt-only,3,0.4606,0.4584,0.4569,0.4033,0.318,0.5908,0.0047,0.0037,0.001,0.0111,0.0042,0.0046,0.0,0.0
