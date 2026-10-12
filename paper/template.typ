@@ -73,7 +73,10 @@
   set figure.caption(separator: [. ])
 
   // Налаштування відступів рисунтів
-  show figure: body => block(above: line-spacing * 3, below: line-spacing * 3, body)
+  show figure: body => {
+    set par(leading: line-spacing)
+    block(above: line-spacing * 3, below: line-spacing * 3, body)
+  }
   // Вирінвнювання в таблицях
   show table.cell: set align(horizon)
 
@@ -83,6 +86,7 @@
 
   // Математичні формули
   set math.equation(numbering: "(1)")
+  show math.equation: set block(above: line-spacing * 3, below: line-spacing * 3)
   show math.equation: set text(font: "STIX Two Math")
 
   // Виноски
@@ -102,6 +106,8 @@
 
   // Особливі терміни та симовли
   show "F1": $F_1$
+  show "mAP": $"mAP"$
+  show "S3OD": [S#super[3]OD]
   show "mAP_S": $"mAP"_"S"$
   show "mAP_M": $"mAP"_"M"$
   show "mAP_L": $"mAP"_"L"$
