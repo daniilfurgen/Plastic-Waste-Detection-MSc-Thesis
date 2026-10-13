@@ -520,6 +520,58 @@ Takeaways:
 - A decayed running histogram for the thresholds remains a possible way to steady the noisy
   per-epoch thresholds, but no mAP gain is expected from it.
 
+#### `fractions-loo`: leave-one-out at 10% of the labels
+
+Output: `runs/mean_teacher/ablation-fractions-loo/`. At full labels SSL adds only +0.004–0.006 over
+its control and most components cannot be told apart from noise; SSL usually helps most with few
+labels (the earlier single-seed 10% runs gave +0.016). This batch repeats the `loo-seeds`
+leave-one-out at 10% of the FloW-img labels (120 images) to see whether the components matter where
+SSL actually works.
+
+All runs start from the existing `fractions` 10% warm-up (supervised, so unaffected by the size-bin
+change) and train on `data/flow_img_10pct.yaml`. GT is repeated 10× so GT and pseudo-labels keep
+their full-label share of an epoch; the GT-only control is step-matched (`--gt-repeat 34`).
+
+| Config | Change from `final` |
+|---|---|
+| `final` | — (cap 2,400, soft weights, size bins, multi-view, GT tail, EMA 0.9996) |
+| `no-multi-view`, `no-size-bins`, `no-soft-weights`, `no-gt-tail`, `fast-ema` | as in `loo-seeds` |
+| `cap-4800` | 4,800 pseudo-labelled frames per epoch (looked slightly better at 10–25% in `fractions`) |
+| `gt-only` | no pseudo-labels, step-matched |
+
+24 runs (8 configs × seeds 42–44), about 10 h.
+
+Result (COCO mAP50-95, mean ± std over seeds 42–44; late = epochs 8–15; start 0.343):
+
+| Config | Best | Late | Final | Late vs. `final` | Late vs. `gt-only` |
+|---|---|---|---|---|---|
+| final | 0.3575 ± 0.0012 | 0.3566 ± 0.0011 | 0.3570 ± 0.0011 | — | +0.0116 |
+| no-multi-view | 0.3539 ± 0.0011 | 0.3532 ± 0.0008 | 0.3532 ± 0.0008 | −0.0034 | +0.0082 |
+| no-size-bins | 0.3576 ± 0.0022 | 0.3563 ± 0.0025 | 0.3571 ± 0.0019 | −0.0003 | +0.0113 |
+| no-soft-weights | 0.3602 ± 0.0024 | 0.3585 ± 0.0030 | 0.3602 ± 0.0024 | +0.0019 | +0.0135 |
+| no-gt-tail | 0.3593 ± 0.0013 | 0.3575 ± 0.0008 | 0.3587 ± 0.0017 | +0.0009 | +0.0125 |
+| fast-ema | 0.3593 ± 0.0026 | 0.3567 ± 0.0022 | 0.3542 ± 0.0021 | +0.0001 | +0.0117 |
+| **cap-4800** | **0.3630 ± 0.0036** | **0.3618 ± 0.0032** | **0.3609 ± 0.0037** | **+0.0052** | **+0.0168** |
+| gt-only | 0.3469 ± 0.0011 | 0.3450 ± 0.0012 | 0.3425 ± 0.0018 | −0.0116 | — |
+
+Takeaways:
+- **SSL clearly helps at 10% of the labels:** +0.012 (late) / +0.015 (final) over the step-matched
+  control, about three times the full-label gain and far above the seed spread. COCO `mAP_s`
+  (input-scale bins) rises from 0.328 to 0.339.
+- **More pseudo-labelled frames help here:** the 4,800 cap beats 2,400 by +0.005 late, higher for
+  every seed (+0.003 to +0.007 paired). The opposite of full labels, where pseudo-labels flooding the
+  epoch hurt.
+- **Multi-view inference matters at 10%:** without the flipped view the result is lower for every
+  seed (−0.002 to −0.005 paired, −0.0034 on the mean). At full labels it made no difference.
+- **The slow Teacher stabilises the end of training:** with EMA 0.999 the late mean is the same but
+  the last epoch is 0.003 lower, the same drift as at full labels.
+- **Size bins, soft weights and the GT tail add nothing measurable** at 10% either. Soft weights may
+  even cost a little (+0.002 late and +0.003 final without them, but one seed goes the other way).
+- So the components that carry the gain are the amount of pseudo-labelled data, multi-view
+  inference and the slow Teacher; a combined check of `cap-4800` without soft weights, size bins and
+  the GT tail would confirm whether the simpler pipeline is at least as good.
+
+
 #### `ucwd`: UCWD baseline at imgsz 640
 
 Output: `runs/mean_teacher/ablation-ucwd/`. UCWD is coastal UAV litter with 7 classes, so the
@@ -599,6 +651,17 @@ single-class and was not affected. `metrics.py` now maps the ids back and no lon
 (`runs/mean_teacher/ablation-ucwd/fix_coco_metrics.py`; originals kept as
 `results.before_coco_fix.csv`), and the full-label warm-up was evaluated into `eval_best.csv`.
 
+**COCO size bins are taken at the network input scale (since 2026-10-13).** pycocotools' small /
+medium / large limits (32², 96² px) assume COCO-sized images (longer side ~640 px), but they were
+applied to box areas in original pixels: FloW-img is 1280 px wide and UCWD 1200–5472 px, so most
+boxes the network sees as small were binned as medium or large. `evaluate_coco` now rescales every
+GT and predicted area per image by `(imgsz / longer side)²`, the same scale the pseudo-labeller
+bins at. Only `mAP_s/m/l` and `AR_s/m/l` change; every metric over all
+sizes, the fitness and the checkpoint selection are unchanged, so no run was retrained. All stored
+results were recomputed from the saved per-epoch predictions with
+[`recompute_coco.py`](recompute_coco.py) (originals kept as `results.before_size_norm.csv`), and the
+size-binned numbers in this file are the recomputed ones.
+
 ## Exporting results for the thesis
 
 ```bash
@@ -620,22 +683,12 @@ mAP50-95 quoted in this README by about ±0.001.
 | `ssod_mt_settings_curves.csv` | The same runs per epoch, in long format, for training-curve plots. |
 | `ssod_mt_long_runs_curves.csv` | The 50–100-epoch runs before the ablation (v2 with the threshold and loss-gain bugs, v3 with the full pool). |
 | `ssod_components.csv`, `ssod_components_curves.csv` | The `components` batch, including the change from `final`. |
-**COCO size bins are taken at the network input scale (since 2026-10-13).** pycocotools' small /
-medium / large limits (32², 96² px) assume COCO-sized images (longer side ~640 px), but they were
-applied to box areas in original pixels: FloW-img is 1280 px wide and UCWD 1200–5472 px, so most
-boxes the network sees as small were binned as medium or large. `evaluate_coco` now rescales every
-GT and predicted area per image by `(imgsz / longer side)²`, the same scale the pseudo-labeller
-bins at. Only `mAP_s/m/l` and `AR_s/m/l` change; every metric over all
-sizes, the fitness and the checkpoint selection are unchanged, so no run was retrained. All stored
-results were recomputed from the saved per-epoch predictions with
-[`recompute_coco.py`](recompute_coco.py) (originals kept as `results.before_size_norm.csv`), and the
-size-binned numbers in this file are the recomputed ones.
-
 | `ssod_mechanisms.csv`, `ssod_mechanisms_curves.csv` | The `mechanisms` batch with its `final` and `gt-only` references, including the change from `final`. |
 | `ssod_add_one_in.csv`, `ssod_add_one_in_curves.csv` | The `add-one-in` batch with its references, including the change from `minimal`. |
 | `ssod_loo_seed_runs.csv`, `ssod_loo_seed_summary.csv`, `ssod_loo_seed_curves.csv` | `loo-seeds`: one row per seed run, mean ± std per configuration with differences from `final` and `gt-only`, and per-epoch curves. |
 | `ssod_tuned_seed_runs.csv`, `ssod_tuned_seed_summary.csv`, `ssod_tuned_seed_curves.csv` | The same for `tuned-seeds`, with differences from `gt-only`. |
 | `ssod_pl_lag_seed_runs.csv`, `ssod_pl_lag_seed_summary.csv`, `ssod_pl_lag_seed_curves.csv` | `pl-lag` with `loo-seeds/final` as k = 1 (`lag1`), with differences from `lag1`. |
+| `ssod_fractions_loo_seed_runs.csv`, `ssod_fractions_loo_seed_summary.csv`, `ssod_fractions_loo_seed_curves.csv` | `fractions-loo`: one row per seed run, mean ± std per configuration with differences from `final` and `gt-only`, and per-epoch curves. |
 | `ssod_ucwd.csv`, `ssod_ucwd_curves.csv` | UCWD: supervised 25% and 100%, Mean Teacher and GT-only control on 25% (COCO metrics), and per-epoch curves. |
 | `ssod_seed_runs.csv`, `ssod_seed_summary.csv` | One row per seed run of `final`, `simple`, `minimal` and `gt-only` (best-epoch metrics, late mean, final), and their mean and standard deviation per configuration. |
 | `ssod_architectures.csv` | Supervised, GT-only control and each cap for YOLO26m, YOLO11m and YOLO12m. |

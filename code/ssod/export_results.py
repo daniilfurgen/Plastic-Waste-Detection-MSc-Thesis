@@ -163,6 +163,12 @@ PL_LAG_SEED_RUNS: dict[str, list[tuple[str, Path]]] = {
         for k in (3, 8)
     },
 }
+# Leave-one-out at 10% of the labels (see ABLATION.md, `fractions-loo`).
+FRACTION_LOO_CONFIGS = [*LOO_CONFIGS[:-1], "cap-4800", "gt-only"]
+FRACTION_LOO_SEED_RUNS: dict[str, list[tuple[str, Path]]] = {
+    config: [(seed, MT / f"ablation-fractions-loo/{config}-seed{seed}") for seed in SEEDS]
+    for config in FRACTION_LOO_CONFIGS
+}
 UCWD = MT / "ablation-ucwd"
 UCWD_RUNS = [
     Run("25pct-ssl", UCWD / "25pct-ssl", pl_cap=2303),
@@ -502,6 +508,10 @@ def main(
     write(lag, out_dir, "ssod_pl_lag_seed_runs.csv")
     write(seed_summary(lag, references=("lag1",)), out_dir, "ssod_pl_lag_seed_summary.csv")
     write(seed_curves(PL_LAG_SEED_RUNS), out_dir, "ssod_pl_lag_seed_curves.csv")
+    fraction_loo = seed_runs(FRACTION_LOO_SEED_RUNS)
+    write(fraction_loo, out_dir, "ssod_fractions_loo_seed_runs.csv")
+    write(seed_summary(fraction_loo, references=("final", "gt-only")), out_dir, "ssod_fractions_loo_seed_summary.csv")
+    write(seed_curves(FRACTION_LOO_SEED_RUNS), out_dir, "ssod_fractions_loo_seed_curves.csv")
     write(ucwd(), out_dir, "ssod_ucwd.csv")
     write(curves(UCWD_RUNS), out_dir, "ssod_ucwd_curves.csv")
     write(architectures(), out_dir, "ssod_architectures.csv")

@@ -24,6 +24,7 @@ Batches:
   loo-seeds              leave-one-out of every component x seeds 42-44, pipeline warm-up (runs/mean_teacher/ablation-loo-seeds)
   tuned-seeds            final and GT-only control x seeds 42-44 from the tuned YOLO26m (runs/mean_teacher/ablation-tuned-seeds)
   pl-lag                 final with the pseudo-labelling Teacher refreshed every 3 / 8 epochs x seeds 42-44 (runs/mean_teacher/ablation-pl-lag)
+  fractions-loo          leave-one-out + cap 4800 at 10% of the labels x seeds 42-44 (runs/mean_teacher/ablation-fractions-loo)
   ucwd                   UCWD at imgsz 640: supervised warm-up on all labels; SSL vs. control on 25% (runs/mean_teacher/ablation-ucwd)
 
 Batches up to fractions-2400 bin pseudo-labels in original pixels (pinned); later ones use the
@@ -470,6 +471,45 @@ BATCHES["pl-lag"] = Batch(
     runs=seeded({
         f"lag{k}": [*FINAL_SSL, "--pl-teacher-refresh-epochs", str(k)] for k in (3, 8)
     }),
+)
+
+# Leave-one-out at 10% of the labels, where SSL helps most, from the existing 10% warm-up. GT is
+# repeated 10x so GT and pseudo-labels keep their full-label share of an epoch; the control is
+# step-matched. `cap-4800` doubles the pseudo-labelled frames, which looked slightly better at
+# 10-25% before.
+FRACTION_LOO_PCT = 10
+FRACTION_LOO_GT = round(GT_TRAIN_IMAGES * FRACTION_LOO_PCT / 100)
+FRACTION_LOO_GT_REPEAT = round(100 / FRACTION_LOO_PCT)
+FRACTION_LOO_CONFIGS = {
+    **{
+        name: [*args, "--gt-repeat", str(FRACTION_LOO_GT_REPEAT)]
+        for name, args in LOO_CONFIGS.items()
+        if name != "gt-only"
+    },
+    "cap-4800": [
+        "--pl-images-per-epoch", "4800", "--pl-soft-weights", "--ema-decay", "0.9996",
+        "--gt-repeat", str(FRACTION_LOO_GT_REPEAT),
+    ],
+    "gt-only": [
+        "--pl-images-per-epoch", "0",
+        "--ema-decay", "0.9996",
+        "--gt-repeat", str(matched_gt_repeat(
+            FRACTION_LOO_GT, FRACTION_LOO_GT_REPEAT, pl_images=CAP_2400_PL_IMAGES
+        )),
+    ],
+}
+_fraction_loo_runs = seeded(FRACTION_LOO_CONFIGS)
+BATCHES["fractions-loo"] = Batch(
+    project=Path("runs/mean_teacher/ablation-fractions-loo"),
+    runs=_fraction_loo_runs,
+    warmups={
+        "10pct-warmup": Warmup(
+            fraction=FRACTION_LOO_PCT / 100,
+            epochs=warmup_epochs(FRACTION_LOO_PCT / 100),
+            root=FRACTIONS_PROJECT,
+        )
+    },
+    run_warmup={run: "10pct-warmup" for run in _fraction_loo_runs},
 )
 
 # UCWD (coastal UAV litter, 7 classes) baseline at imgsz 640: the supervised warm-up on all labels,
