@@ -36,6 +36,7 @@
       spacing: .65em,
       table(
         fill: (x, y) => if y == 0 { luma(200) },
+        row-gutter: (1mm, auto),
         ..table-args,
       ),
       ..if note != none {
@@ -109,7 +110,22 @@
     show figure.caption: set align(right)
     fig
   }
-  set figure.caption(separator: [. ])
+  set figure.caption(separator: [ --- ])
+
+  show heading.where(level: 1): it => {
+    it
+    counter(math.equation).update(0)
+    // counter(figure).update(0) does nothing
+    // this is the correct default
+    counter(figure.where(kind: image)).update(0)
+    counter(figure.where(kind: table)).update(0)
+    counter(figure.where(kind: raw)).update(0)
+  }
+  let prepend-with-section(numbering: "1.1", ..n) = context {
+    let sec = counter(heading).get().first()
+    std.numbering(numbering, sec, ..n)
+  }
+  set figure(numbering: prepend-with-section.with(numbering: "1.1"))
 
   // Налаштування відступів рисунтів
   show figure: body => {
@@ -125,9 +141,10 @@
   // show link: underline
 
   // Математичні формули
-  set math.equation(numbering: "(1)")
+  set math.equation(numbering: prepend-with-section.with(numbering: "(1.1)"))
   show math.equation: set block(above: line-spacing * 3, below: line-spacing * 3)
   show math.equation: set text(font: "STIX Two Math")
+  show math.equation.where(block: false): set math.frac(style: "horizontal")
 
   // Виноски
   show footnote.entry: set text(size: 12pt)
