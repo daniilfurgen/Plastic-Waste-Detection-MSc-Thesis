@@ -195,7 +195,7 @@ Takeaways:
   or below their baseline, because repeated GT overfits. The SSL and control curves separate from
   epoch 2 onwards and never cross.
 - **The gain grows as labels shrink,** as expected for SSOD. At 10% labels, recall rises from 0.717
-  to 0.755 and `mAP_s` from 0.237 to 0.271 over the control.
+  to 0.755 and `mAP_s` from 0.316 to 0.342 over the control.
 - **SSL saves labels.** With 50% of the labels, SSL reaches 0.4295 at its best epoch, essentially
   the full-label supervised baseline (0.430). The final epoch is 0.421.
 - **Single seed.** The 10–25% gaps (~0.02, consistent across epochs) are robust. Differences of
@@ -345,19 +345,19 @@ Result after 15 epochs (mAP50-95, baseline 0.448; "late mean" = mean of epochs 8
 
 | Run | Best (epoch) | Last | Late mean | mAP_s, last |
 |---|---|---|---|---|
-| **gt-only** | 0.459 (6) | **0.453** | **0.456** | 0.310 |
-| no-soft-weights | **0.461 (7)** | 0.447 | 0.452 | **0.322** |
-| final | 0.458 (3) | 0.441 | 0.446 | 0.314 |
-| fast-ema | 0.459 (1) | 0.430 | 0.432 | 0.305 |
-| no-cap | 0.444 (1) | 0.410 | 0.413 | 0.281 |
+| **gt-only** | 0.459 (6) | **0.453** | **0.456** | 0.403 |
+| no-soft-weights | **0.461 (7)** | 0.447 | 0.452 | **0.410** |
+| final | 0.458 (3) | 0.441 | 0.446 | 0.401 |
+| fast-ema | 0.459 (1) | 0.430 | 0.432 | 0.397 |
+| no-cap | 0.444 (1) | 0.410 | 0.413 | 0.372 |
 
 Takeaways:
 - **From the tuned model, pseudo-labels no longer beat the GT-only control.** `final` ends 0.012
   below it, 0.010 on the late mean. The control gains about the same as from the untuned warm-up
   (+0.005 at epoch 15). What changed is the pseudo-label contribution: a stronger Teacher's labels
   carry less the Student doesn't already know, while its errors still feed back.
-- **Pseudo-labels still help small objects and hurt the rest.** At epoch 15, against the control,
-  `mAP_s` is +0.004 (`final`) and +0.012 (`no-soft-weights`), while `mAP_m` is −0.021 and −0.015,
+- **Pseudo-labels barely help small objects and hurt the rest.** At epoch 15, against the control,
+  `mAP_s` is −0.002 (`final`) and +0.007 (`no-soft-weights`), while `mAP_m` is −0.037 and −0.029,
   and `mAP75` is lower for `final` (0.369 vs. 0.385).
 - **The cap and the slow Teacher still matter.** Without the cap the run collapses (−0.037); EMA
   0.999 peaks at epoch 1 and drifts to 0.430. The drift signature is unchanged: pseudo-boxes per
@@ -584,7 +584,8 @@ from extra fine-tuning with the EMA-averaged Teacher, not from pseudo-labels.
 | supervised 100% | — | — | 0.5803 | 0.854 |
 
 SSL is ahead of its control by about +0.006 (one seed), closing under 10% of the 25%→100% gap.
-COCO `mAP_s` is not meaningful on UCWD: only 1% of the boxes are small in original pixels.
+With size bins at the network input scale (see below), 87% of the UCWD val boxes are small (under
+1% in original pixels), so COCO `mAP_s` is meaningful on UCWD as well.
 
 The best epoch is selected on the same val split it is reported on, so it is optimistic; prefer
 the late mean or the final epoch when reporting.
@@ -619,6 +620,17 @@ mAP50-95 quoted in this README by about ±0.001.
 | `ssod_mt_settings_curves.csv` | The same runs per epoch, in long format, for training-curve plots. |
 | `ssod_mt_long_runs_curves.csv` | The 50–100-epoch runs before the ablation (v2 with the threshold and loss-gain bugs, v3 with the full pool). |
 | `ssod_components.csv`, `ssod_components_curves.csv` | The `components` batch, including the change from `final`. |
+**COCO size bins are taken at the network input scale (since 2026-10-13).** pycocotools' small /
+medium / large limits (32², 96² px) assume COCO-sized images (longer side ~640 px), but they were
+applied to box areas in original pixels: FloW-img is 1280 px wide and UCWD 1200–5472 px, so most
+boxes the network sees as small were binned as medium or large. `evaluate_coco` now rescales every
+GT and predicted area per image by `(imgsz / longer side)²`, the same scale the pseudo-labeller
+bins at. Only `mAP_s/m/l` and `AR_s/m/l` change; every metric over all
+sizes, the fitness and the checkpoint selection are unchanged, so no run was retrained. All stored
+results were recomputed from the saved per-epoch predictions with
+[`recompute_coco.py`](recompute_coco.py) (originals kept as `results.before_size_norm.csv`), and the
+size-binned numbers in this file are the recomputed ones.
+
 | `ssod_mechanisms.csv`, `ssod_mechanisms_curves.csv` | The `mechanisms` batch with its `final` and `gt-only` references, including the change from `final`. |
 | `ssod_add_one_in.csv`, `ssod_add_one_in_curves.csv` | The `add-one-in` batch with its references, including the change from `minimal`. |
 | `ssod_loo_seed_runs.csv`, `ssod_loo_seed_summary.csv`, `ssod_loo_seed_curves.csv` | `loo-seeds`: one row per seed run, mean ± std per configuration with differences from `final` and `gt-only`, and per-epoch curves. |

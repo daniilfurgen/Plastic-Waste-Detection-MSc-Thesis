@@ -1,6 +1,8 @@
 """
 COCO evaluation and prediction harmonization metrics module for YOLO Mean Teacher training.
 Computes standard COCO AP/AR metrics (all scales, small, medium, large) and peak F1 score.
+The COCO size bins are applied at the network input scale, since the 32²/96² px thresholds assume
+COCO-sized images (longer side ~640 px) and the datasets here are larger and of mixed resolution.
 """
 
 from __future__ import annotations
@@ -15,9 +17,9 @@ from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 
 try:
-    from ssod.utilities import get_logger
+    from ssod.utilities import get_logger, input_scale
 except ImportError:
-    from utilities import get_logger  # type: ignore[import-not-found,no-redef]
+    from utilities import get_logger, input_scale  # type: ignore[import-not-found,no-redef]
 
 
 def fix_prediction_ids(
@@ -62,16 +64,31 @@ def fix_prediction_ids(
     return predictions
 
 
+def scale_areas(coco: COCO, images: dict[int, dict[str, Any]], imgsz: int) -> None:
+    """
+    Rescale every annotation's `area` in place to the network input (longer side -> imgsz), so
+    COCOeval's size bins see the boxes at the scale the detector does. Per image, as resolutions
+    differ within a dataset.
+    """
+    for ann in coco.anns.values():
+        img = images[ann["image_id"]]
+        ann["area"] = ann["area"] * input_scale(img["width"], img["height"], imgsz) ** 2
+
+
 def evaluate_coco(
     coco_gt_path: Path | str,
     predictions_path: Path | str,
     fix_ids: bool = True,
     default_category_id: int = 0,
     category_offset: int = 1,
+    imgsz: int | None = 640,
     logger: logging.Logger | None = None,
 ) -> dict[str, float]:
     """
     Evaluate bounding box predictions using pycocotools COCOeval.
+
+    Box areas for the small/medium/large bins are taken at the network input scale `imgsz`
+    (`None`: original pixels). Metrics over all sizes do not depend on it.
 
     Returns:
         Dictionary containing standard COCO AP/AR metrics:
@@ -135,6 +152,9 @@ def evaluate_coco(
     try:
         coco_gt = COCO(str(gt_path))
         coco_dt = coco_gt.loadRes(preds)
+        if imgsz is not None:
+            scale_areas(coco_gt, coco_gt.imgs, imgsz)
+            scale_areas(coco_dt, coco_gt.imgs, imgsz)
 
         coco_eval = COCOeval(coco_gt, coco_dt, "bbox")
         coco_eval.evaluate()

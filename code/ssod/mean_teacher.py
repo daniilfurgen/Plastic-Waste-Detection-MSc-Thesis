@@ -676,6 +676,7 @@ def evaluate_model_coco(
         coco_res = evaluate_coco(
             coco_gt_path=effective_coco_gt,
             predictions_path=preds_json,
+            imgsz=imgsz,
             logger=log,
         )
         for k, v in coco_res.items():

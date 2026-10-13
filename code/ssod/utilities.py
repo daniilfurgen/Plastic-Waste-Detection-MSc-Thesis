@@ -6,6 +6,11 @@ LOGGER_NAME = "msc_thesis"
 _HANDLER_MARKER = "_msc_thesis_handler"
 
 
+def input_scale(img_width: float, img_height: float, imgsz: int) -> float:
+    """Letterbox resize factor from an image to the network input (longer side -> imgsz)."""
+    return imgsz / max(img_width, img_height)
+
+
 def get_logger(
     log_file: str | Path | None = None,
     level: int = logging.INFO,

@@ -249,6 +249,52 @@ class TestCOCOMultiClass:
         assert metrics["mAP_50"] > 0.99
 
 
+class TestCOCOSizeBins:
+    """COCO size bins are applied at the network input scale, per image."""
+
+    @pytest.fixture
+    def coco_files(self, tmp_path):
+        gt_path = tmp_path / "annotations.json"
+        pred_path = tmp_path / "predictions.json"
+        # A 40x40 box is medium in original pixels; at imgsz 640 it is 20x20 on the 1280-px image
+        # (small) and 40x40 on the 640-px image (medium).
+        gt = {
+            "images": [
+                {"id": 1, "file_name": "big.jpg", "width": 1280, "height": 720},
+                {"id": 2, "file_name": "native.jpg", "width": 640, "height": 480},
+            ],
+            "categories": [{"id": 0, "name": "bottle"}],
+            "annotations": [
+                {"id": 1, "image_id": 1, "category_id": 0, "bbox": [100, 100, 40, 40], "area": 1600, "iscrowd": 0},
+                {"id": 2, "image_id": 2, "category_id": 0, "bbox": [100, 100, 40, 40], "area": 1600, "iscrowd": 0},
+            ],
+        }
+        gt_path.write_text(json.dumps(gt))
+        preds = [
+            {"image_id": 1, "file_name": "big.jpg", "category_id": 1, "bbox": [100, 100, 40, 40], "score": 0.9},
+            {"image_id": 2, "file_name": "native.jpg", "category_id": 1, "bbox": [100, 100, 40, 40], "score": 0.9},
+        ]
+        pred_path.write_text(json.dumps(preds))
+        return gt_path, pred_path
+
+    def test_original_pixels(self, coco_files):
+        metrics = evaluate_coco(*coco_files, imgsz=None)
+        assert metrics["mAP_s"] == -1.0  # no small GT
+        assert metrics["AR_m"] == pytest.approx(1.0)
+
+    def test_input_scale_per_image(self, coco_files):
+        metrics = evaluate_coco(*coco_files, imgsz=640)
+        assert metrics["mAP_s"] == pytest.approx(1.0)
+        assert metrics["AR_s"] == pytest.approx(1.0)
+        assert metrics["mAP_m"] == pytest.approx(1.0)  # the 640-px image keeps its box medium
+
+    def test_overall_metrics_independent_of_scale(self, coco_files):
+        native = evaluate_coco(*coco_files, imgsz=None)
+        scaled = evaluate_coco(*coco_files, imgsz=640)
+        for key in ("mAP_50_95", "mAP_50", "mAP_75", "AR_100", "peak_f1"):
+            assert scaled[key] == native[key]
+
+
 def test_discover_coco_gt_prefers_dataset_annotations(tmp_path):
     """The dataset's own val annotations win over the FloW fallback next to its YAML."""
     for ds in ("flow_img", "ucwd"):

@@ -33,9 +33,9 @@ import typer
 from ultralytics import YOLO
 
 try:
-    from ssod.utilities import get_logger
+    from ssod.utilities import get_logger, input_scale
 except ImportError:
-    from utilities import get_logger  # type: ignore[import-not-found,no-redef]
+    from utilities import get_logger, input_scale  # type: ignore[import-not-found,no-redef]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -78,11 +78,6 @@ app = typer.Typer(
 # ---------------------------------------------------------------------------------------------
 # Input scale and size bins
 # ---------------------------------------------------------------------------------------------
-
-
-def input_scale(img_width: float, img_height: float, imgsz: int) -> float:
-    """Letterbox resize factor from an image to the network input (longer side -> imgsz)."""
-    return imgsz / max(img_width, img_height)
 
 
 def assign_size_bins(areas: np.ndarray) -> np.ndarray:
