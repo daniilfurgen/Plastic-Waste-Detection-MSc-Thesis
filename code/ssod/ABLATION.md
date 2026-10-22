@@ -19,10 +19,12 @@ Based on the batches below, the trainer's defaults are now:
 | `--pl-soft-weights` | on | Part of every best configuration since `pool`. |
 | `--ema-decay` | 0.9996 | Removes most of the late drift; 0.9998 adds nothing. |
 | `--pl-input-scale-bins` | on | Size bins at the network input scale, so they mean the same on any image resolution (needed for UCWD, whose images range from 1200×800 to 5472×3648). Adopted on principle, not from an ablation; all batches below ran with original-pixel bins. |
+| `--tail-ratio` | 0 | All GT is shuffled with the pseudo-labels; no unmixed GT at the end of each epoch. The 25% GT tail showed no measurable effect in `mechanisms`, `add-one-in`, `loo-seeds` or `fractions-loo`. All batches below ran with the 25% tail. |
 
 Earlier batches pin their original settings explicitly in `ablation.py` (EMA 0.999, hard labels,
-full pool via `--pl-images-per-epoch -1`, original-pixel size bins via `--no-pl-input-scale-bins`),
-so they reproduce exactly.
+full pool via `--pl-images-per-epoch -1`, original-pixel size bins via `--no-pl-input-scale-bins`,
+the 25% GT tail via `--tail-ratio 0.25`), so they reproduce exactly. Where a batch table below
+describes `final` as including the GT tail, that is the configuration those runs used.
 
 ## How runs are kept comparable
 
@@ -702,13 +704,13 @@ supervised starting point.
 | Flag | Meaning |
 |---|---|
 | `--pl-images-per-epoch N` | Pseudo-label a fresh random sample of N unlabeled frames each epoch (default 2,400) instead of all ~27k. Sampling whole images keeps the small/medium/large box mix unchanged. `0` disables pseudo-labels (GT-only control); `-1` uses the whole pool. |
-| `--gt-repeat k` | Repeat the GT part of each epoch (except the 25% tail) k times. |
+| `--gt-repeat k` | Repeat the GT part of each epoch (except the GT tail, if any) k times. |
 | `--gt-yaml` | Ground-truth dataset YAML (used for the label-fraction subsets). |
 | `--model` | Architecture name recorded with the run; the weights themselves come from `--warmup-weights`. |
 | `--pl-soft-weights` (default on) | Weight each pseudo-box's loss by its confidence relative to its size bin: 0 at the bin's threshold, 1 at the bin's typical high score. Small objects are judged against small-object scores. Boxes near the threshold get ~0 weight and are effectively ignored, not treated as background. |
 | `--no-pl-size-bins` | Use one ground threshold (and one object mode) for all pseudo-boxes instead of one per COCO size bin. |
 | `--no-pl-multi-view` | The Teacher pseudo-labels from the normal view only, without the horizontally flipped view. |
-| `--tail-ratio r` | Fraction of GT placed, unmixed, at the end of each epoch (default 0.25; 0 mixes all GT with the pseudo-labels). |
+| `--tail-ratio r` | Fraction of GT placed, unmixed, at the end of each epoch (default 0: all GT mixed with the pseudo-labels; every batch in this file ran with 0.25 unless it sets 0, pinned via `LEGACY_GT_TAIL`). |
 | `--pl-strong-aug` | Stronger colour jitter, blur and random erasing on pseudo-labelled images only. |
 | `--unsupervised-weight λ` | Multiply the pseudo-label loss by λ. |
 | `--no-pl-input-scale-bins` | Take pseudo-label size bins in original image pixels instead of at the network input scale. Every batch in this file runs with it (pinned via `LEGACY_SIZE_BINS`), since they predate input-scale bins. On FloW-img (1280 px wide, `imgsz` 640) this shifts the bin limits by 2× per side, so earlier results remain internally consistent. |

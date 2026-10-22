@@ -7,7 +7,7 @@ Features:
    - Initializes Student model from trained Teacher weights (theta_S <- theta_T).
 2. Mean Teacher Training Loop:
    - Starts each epoch by generating pseudo-labels on unlabeled pool using PseudoLabelGenerator.
-   - Synchronizes SSODDatasetHandler with 25% GT tail / 75% GT+PL head sequencing and 10% mosaic closing.
+   - Synchronizes SSODDatasetHandler epoch sequencing (GT shuffled with pseudo-labels; optional GT tail) and 10% mosaic closing.
    - Trains Student with YOLO default detection loss (with optional unsupervised weight lambda_u).
    - Updates Teacher EMA at every training step.
    - Evaluates Teacher on GT validation split every epoch:
@@ -263,7 +263,7 @@ class MeanTeacherConfig:
 
     # EMA & SSL policies
     ema_decay: float = 0.9996
-    tail_ratio: float = 0.25
+    tail_ratio: float = 0.0  # GT fraction placed unmixed at the epoch end; 0 mixes all GT
     close_mosaic_ratio: float = 0.10
     unsupervised_weight: float = 1.0
     unsupervised_warmup_epochs: int = 0  # linear lambda_u ramp-up; 0 disables
@@ -1459,7 +1459,7 @@ class MeanTeacherTrainer:
                     )
                     dataset_handler.reload_pseudo_labels(filtered_df=gen_out.filtered_df)
 
-                # B. Configure epoch (25% GT tail sampling, 10% mosaic closing)
+                # B. Configure epoch (GT/PL sequencing, 10% mosaic closing)
                 train_loader = dataset_handler.get_train_loader(persistent_workers=True)
                 dataset_handler.set_epoch(
                     epoch=epoch,
@@ -1728,7 +1728,9 @@ def main(
         help="Epochs of linear ramp-up for lambda_u (0 disables).",
     ),
     tail_ratio: float = typer.Option(
-        0.25, "--tail-ratio", help="Fraction of GT placed at the tail of each epoch."
+        0.0,
+        "--tail-ratio",
+        help="Fraction of GT placed, unmixed, at the tail of each epoch (0 mixes all GT with the pseudo-labels).",
     ),
     close_mosaic_ratio: float = typer.Option(
         0.10,
@@ -1878,7 +1880,7 @@ def main(
     chosen_lrf = float(pick_val("lrf", lrf, "lrf", 0.01))
     chosen_unsupervised_weight = float(pick_val("unsupervised_weight", unsupervised_weight, "unsupervised_weight", 1.0))
     chosen_unsupervised_warmup_epochs = int(pick_val("unsupervised_warmup_epochs", unsupervised_warmup_epochs, "unsupervised_warmup_epochs", 0))
-    chosen_tail_ratio = float(pick_val("tail_ratio", tail_ratio, "tail_ratio", 0.25))
+    chosen_tail_ratio = float(pick_val("tail_ratio", tail_ratio, "tail_ratio", 0.0))
     chosen_close_mosaic_ratio = float(pick_val("close_mosaic_ratio", close_mosaic_ratio, "close_mosaic_ratio", 0.10))
     chosen_gt_repeat = int(pick_val("gt_repeat", gt_repeat, "gt_repeat", 1))
     chosen_pl_strong_aug = bool(pick_val("pl_strong_aug", pl_strong_aug, "pl_strong_aug", False))

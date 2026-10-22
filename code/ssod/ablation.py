@@ -551,6 +551,15 @@ BATCHES["ucwd"] = Batch(
     references={"100pct-supervised (warm-up)": UCWD_PROJECT / "100pct-warmup"},
 )
 
+# Every batch above ran with the former 25% GT tail default; pin it so they stay reproducible.
+# The trainer now mixes all GT with the pseudo-labels (`--tail-ratio 0`), since the tail showed no
+# measurable effect in `mechanisms`, `add-one-in`, `loo-seeds` or `fractions-loo`.
+LEGACY_GT_TAIL = ["--tail-ratio", "0.25"]
+for _batch in BATCHES.values():
+    for _run, _args in _batch.runs.items():
+        if "--tail-ratio" not in _args:
+            _batch.runs[_run] = [*_args, *LEGACY_GT_TAIL]
+
 SUMMARY_FIELDS = [
     "run",
     "epochs_done",

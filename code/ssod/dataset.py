@@ -10,8 +10,9 @@ Supports:
 3. Dynamic pseudo-label accommodation:
    - Refreshing pseudo-labels dynamically at epoch start (from disk or in-memory Polars DataFrame).
 4. Epoch item sequencing:
-   - 25% of GT items uniformly selected for the tail of each epoch.
-   - 75% of GT items shuffled with pseudo-labeled items in the head of each epoch.
+   - GT items (repeated `gt_repeat` times) shuffled with pseudo-labeled items.
+   - Optional GT tail (`tail_ratio`, off by default): a uniformly selected fraction of GT placed,
+     unmixed, at the end of each epoch.
 5. Collate function exposing standard YOLO tensors plus `is_pseudo` sample mask.
 """
 
@@ -80,7 +81,7 @@ class SSODAugmentConfig:
     erase_drop_ratio: float = 0.5  # drop pseudo boxes at least this fraction erased
 
     # SSOD epoch policy
-    tail_ratio: float = 0.25  # 25% of GT uniformly placed at tail of epoch
+    tail_ratio: float = 0.0  # fraction of GT uniformly placed at tail of epoch (0 = no tail)
     close_mosaic_ratio: float = 0.10  # Disable mosaic during last 10% of epochs
 
 
@@ -665,17 +666,18 @@ class SSODSampler(Sampler[int]):
     Epoch-aware sampler for Semi-Supervised Object Detection (SSOD).
 
     Each epoch:
-      1. Uniformly select 25% of GT items (without replacement) to place at the tail.
-      2. The remaining 75% of GT items (repeated `gt_repeat` times) are mixed and shuffled
-         with all pseudo-labeled items.
-      3. Yields indices: [ Shuffled(gt_repeat x 75% GT + 100% Pseudo) ] + [ 25% GT tail ].
+      1. Uniformly select a `tail_ratio` fraction of GT items (without replacement) for the
+         tail; none with the default `tail_ratio=0`.
+      2. The remaining GT items (repeated `gt_repeat` times) are mixed and shuffled with all
+         pseudo-labeled items.
+      3. Yields indices: [ Shuffled(gt_repeat x head GT + 100% Pseudo) ] + [ GT tail ].
     """
 
     def __init__(
         self,
         gt_len: int,
         pl_len: int,
-        tail_ratio: float = 0.25,
+        tail_ratio: float = 0.0,
         seed: int = 42,
         gt_repeat: int = 1,
     ) -> None:
@@ -716,7 +718,7 @@ class SSODSampler(Sampler[int]):
             self._indices = pl_indices
             return self._indices
 
-        # Uniformly partition GT into 25% tail and 75% head
+        # Uniformly partition GT into tail (tail_ratio) and head
         n_tail = (
             max(1, round(n_gt * self.tail_ratio))
             if (n_gt > 1 and self.tail_ratio > 0.0)
@@ -861,7 +863,7 @@ class SSODDatasetHandler:
     Coordinates:
     - GT Train dataset & GT Val dataset
     - Pseudo-labeled Train dataset
-    - SSODSampler with 25% GT tail / 75% GT + PL head sequencing
+    - SSODSampler with GT + PL shuffled sequencing (optional GT tail)
     - Automatic mosaic closing during the last 10% of epochs
     - Dynamic pseudo-label reloading at epoch boundaries
     """
@@ -881,7 +883,7 @@ class SSODDatasetHandler:
         workers: int = 4,
         seed: int = 42,
         augment_cfg: SSODAugmentConfig | None = None,
-        tail_ratio: float = 0.25,
+        tail_ratio: float = 0.0,
         close_mosaic_ratio: float = 0.10,
         filter_empty_pseudo: bool = True,
         gt_repeat: int = 1,
