@@ -25,6 +25,7 @@ Batches:
   tuned-seeds            final and GT-only control x seeds 42-44 from the tuned YOLO26m (runs/mean_teacher/ablation-tuned-seeds)
   fractions-loo          leave-one-out + cap 4800 at 10% of the labels x seeds 42-44 (runs/mean_teacher/ablation-fractions-loo)
   ucwd                   UCWD at imgsz 640: supervised warm-up on all labels; SSL vs. control on 25% (runs/mean_teacher/ablation-ucwd)
+  online-caps            online SSGT, full pipeline at PL caps 2400/4800/9600 x seeds 42-44 (runs/mean_teacher/ablation-online-caps)
 
 All batches now run the online pipeline (per-step pseudo-labels with EMA score histograms). Their
 results so far were produced by the offline per-epoch pipeline at git tag `offline-ssgt`; batches up
@@ -541,6 +542,20 @@ for _batch in BATCHES.values():
     for _run, _args in _batch.runs.items():
         if "--tail-ratio" not in _args:
             _batch.runs[_run] = [*_args, *LEGACY_GT_TAIL]
+
+# ---- Batches with online SSGT and the current defaults (no GT tail) -------------------------
+
+# The full pipeline with online pseudo-labelling (per-step labels, EMA score histograms) at three
+# PL caps over three seeds, from the pipeline's own warm-up. 2,400 was the optimum offline; with
+# labels refreshed every step, larger caps may pay off differently.
+ONLINE_CAPS = (2400, 4800, 9600)
+BATCHES["online-caps"] = Batch(
+    project=Path("runs/mean_teacher/ablation-online-caps"),
+    runs=seeded({
+        f"cap-{cap}": ["--pl-images-per-epoch", str(cap), "--pl-soft-weights", "--ema-decay", "0.9996"]
+        for cap in ONLINE_CAPS
+    }),
+)
 
 SUMMARY_FIELDS = [
     "run",

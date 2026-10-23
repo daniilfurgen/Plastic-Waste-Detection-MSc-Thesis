@@ -702,6 +702,24 @@ results were recomputed from the saved per-epoch predictions with
 [`recompute_coco.py`](recompute_coco.py) (originals kept as `results.before_size_norm.csv`), and the
 size-binned numbers in this file are the recomputed ones.
 
+### Batches with online SSGT
+
+#### `online-caps`: PL cap with online pseudo-labelling
+
+Output: `runs/mean_teacher/ablation-online-caps/`. This batch runs the full pipeline with the
+current defaults and online SSGT: soft weights, size bins, multi-view, EMA 0.9996, no GT tail. It
+uses PL caps of 2,400, 4,800 and 9,600 frames per epoch, each over seeds 42–44, from the pipeline's
+own warm-up (`ssod-v3-50-50`).
+
+Offline, 2,400 was the optimum for YOLO26 at full labels (`architectures`). Labels are now
+refreshed by the current Teacher at every step, and the histograms adapt within an epoch, so larger
+caps may pay off differently. A cap also sets the size of the initial histogram sample.
+
+The closest offline references are `cap-2400` against `loo-seeds/final` (same seeds, offline,
+25% GT tail) and the GT-only control `loo-seeds/gt-only`. Those references are step-matched only
+to the 2,400 cap. The batch has 9 runs. A 9,600-frame epoch is about 4× longer than a 2,400 one,
+so expect roughly 8–9 h.
+
 ## Exporting results for the thesis
 
 ```bash
