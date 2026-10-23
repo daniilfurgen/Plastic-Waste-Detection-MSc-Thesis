@@ -2,18 +2,23 @@
 Semi-Supervised Object Detection (SSOD) dataset handler for YOLO Mean Teacher training.
 
 Supports:
-1. Simultaneous loading of annotated Ground-Truth (train & val) and Pseudo-Labeled (train only).
+1. Simultaneous loading of annotated Ground-Truth (train & val) and unlabeled images (train only),
+   which the Teacher pseudo-labels online at every training step.
 2. Augmentation policy:
-   - HSV, Scale, Translate, and Fliplr applied to both GT and Pseudo datasets.
+   - HSV, Scale, Translate, and Fliplr applied to both GT and unlabeled images.
    - Mosaic applied strictly to GT dataset, closed during the last 10% of epochs.
+   - Unlabeled images also return a weak Teacher view: the same geometry (scale, translate,
+     flip) as the Student's view, without photometric augmentation, so Teacher boxes are
+     already in Student coordinates. Erased patches of the Student view are recorded so mostly
+     erased pseudo boxes can be dropped after labelling.
    - All other augmentations (MixUp, CutMix, CopyPaste, degrees, shear, perspective, flipud, Albumentations) disabled.
-3. Dynamic pseudo-label accommodation:
-   - Refreshing pseudo-labels dynamically at epoch start (from disk or in-memory Polars DataFrame).
+3. A fresh image list for the unlabeled pool at every epoch start.
 4. Epoch item sequencing:
-   - GT items (repeated `gt_repeat` times) shuffled with pseudo-labeled items.
+   - GT items (repeated `gt_repeat` times) shuffled with unlabeled items.
    - Optional GT tail (`tail_ratio`, off by default): a uniformly selected fraction of GT placed,
      unmixed, at the end of each epoch.
-5. Collate function exposing standard YOLO tensors plus `is_pseudo` sample mask.
+5. Collate function exposing standard YOLO tensors plus `is_pseudo` sample mask, Teacher views
+   and erased patches.
 """
 
 from __future__ import annotations
@@ -22,11 +27,10 @@ from dataclasses import dataclass
 import logging
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import cv2
 import numpy as np
-import polars as pl
 import torch
 from torch.utils.data import DataLoader, Dataset, Sampler
 import yaml
@@ -78,7 +82,7 @@ class SSODAugmentConfig:
     erase_p: float = 0.5
     erase_max_patches: int = 3
     erase_area: tuple[float, float] = (0.01, 0.08)
-    erase_drop_ratio: float = 0.5  # drop pseudo boxes at least this fraction erased
+    erase_drop_ratio: float = 0.5  # pseudo boxes at least this fraction erased are dropped
 
     # SSOD epoch policy
     tail_ratio: float = 0.0  # fraction of GT uniformly placed at tail of epoch (0 = no tail)
@@ -100,11 +104,12 @@ class RandomGaussianBlur:
         return labels
 
 
-class BoxAwareRandomErasing:
+class RandomErasing:
     """
-    Erase random rectangular patches with probability p and drop boxes whose area is
-    at least `drop_ratio` erased, so the Student is not asked to detect invisible objects.
-    Must run after RandomPerspective (instances in absolute pixel coordinates).
+    Erase random rectangular patches with probability p and record them (xyxy pixels) in
+    `labels["erase_boxes"]`, so pseudo boxes produced later for the image can be dropped when
+    mostly erased and the Student is not asked to detect invisible objects. Must run after the
+    geometric augmentations (it detects padding by its exact fill value, 114).
     """
 
     def __init__(
@@ -112,20 +117,18 @@ class BoxAwareRandomErasing:
         p: float = 0.5,
         max_patches: int = 3,
         area: tuple[float, float] = (0.01, 0.08),
-        drop_ratio: float = 0.5,
     ) -> None:
         self.p = p
         self.max_patches = max(1, max_patches)
         self.area = area
-        self.drop_ratio = drop_ratio
 
     def __call__(self, labels: dict[str, Any]) -> dict[str, Any]:
+        labels["erase_boxes"] = np.zeros((0, 4), dtype=np.float32)
         if np.random.random() >= self.p:
             return labels
 
         img = labels["img"]
-        h, w = img.shape[:2]
-        erased = np.zeros((h, w), dtype=bool)
+        patches = []
 
         # Place patches inside the image content, not on letterbox / affine border padding (value 114)
         content = (img != 114).any(axis=2)
@@ -147,24 +150,31 @@ class BoxAwareRandomErasing:
             img[y0 : y0 + ph, x0 : x0 + pw] = np.random.randint(
                 0, 256, (ph, pw, img.shape[2]), dtype=img.dtype
             )
-            erased[y0 : y0 + ph, x0 : x0 + pw] = True
+            patches.append([x0, y0, x0 + pw, y0 + ph])
 
-        instances = labels["instances"]
-        if len(instances) > 0:
-            instances.convert_bbox(format="xyxy")
-            if instances.normalized:
-                instances.denormalize(w, h)
-            boxes = np.round(instances.bboxes).astype(int)
-            boxes[:, [0, 2]] = boxes[:, [0, 2]].clip(0, w)
-            boxes[:, [1, 3]] = boxes[:, [1, 3]].clip(0, h)
-            keep = np.ones(len(boxes), dtype=bool)
-            for k, (x1, y1, x2, y2) in enumerate(boxes):
-                if x2 > x1 and y2 > y1:
-                    keep[k] = erased[y1:y2, x1:x2].mean() < self.drop_ratio
-            labels["instances"] = instances[keep]
-            labels["cls"] = labels["cls"][keep]
-
+        if patches:
+            labels["erase_boxes"] = np.array(patches, dtype=np.float32)
         labels["img"] = img
+        return labels
+
+
+class TeacherView:
+    """Keep a copy of the current (weakly augmented) image as the Teacher's input."""
+
+    def __call__(self, labels: dict[str, Any]) -> dict[str, Any]:
+        labels["teacher_img"] = labels["img"].copy()  # later photometric steps work in place
+        return labels
+
+
+class FormatTeacherView:
+    """Convert the Teacher view like `Format` does with the image (HWC BGR -> CHW RGB tensor)."""
+
+    def __call__(self, labels: dict[str, Any]) -> dict[str, Any]:
+        img = labels["teacher_img"]
+        if img.ndim < 3:
+            img = img[..., None]
+        labels["teacher_img"] = torch.from_numpy(np.ascontiguousarray(img.transpose(2, 0, 1)[::-1]))
+        labels["erase_boxes"] = torch.from_numpy(labels.get("erase_boxes", np.zeros((0, 4), np.float32)))
         return labels
 
 
@@ -217,17 +227,19 @@ def build_gt_transforms(
     return Compose(transforms)
 
 
-def build_pseudo_transforms(
+def build_unlabeled_transforms(
     dataset: Any,
     imgsz: int = 640,
     hyp: SSODAugmentConfig | None = None,
 ) -> Compose:
     """
-    Build transforms for Pseudo-Labeled training dataset.
+    Build transforms for the unlabeled training images.
 
-    Mosaic is NEVER included. Includes Scale & Translate (RandomPerspective),
-    RandomHSV, and RandomFlip(fliplr). With `pl_strong`, HSV gains are raised and
-    Gaussian blur plus box-aware random erasing are added. All other augmentations disabled.
+    Mosaic is NEVER included. The geometric steps (Scale & Translate via RandomPerspective, then
+    RandomFlip(fliplr)) are shared by both views; the image after them is kept as the weak
+    Teacher view (`teacher_img`). RandomHSV is then applied for the Student; with `pl_strong`,
+    HSV gains are raised and random erasing plus Gaussian blur are added. All other
+    augmentations disabled.
     """
     cfg = hyp or SSODAugmentConfig()
 
@@ -241,14 +253,9 @@ def build_pseudo_transforms(
     )
 
     if cfg.pl_strong:
-        # Erasing must directly follow the affine step: it detects padding by its exact fill value (114)
+        # Erasing must precede the photometric steps: it detects padding by its exact fill value (114)
         photometric = [
-            BoxAwareRandomErasing(
-                p=cfg.erase_p,
-                max_patches=cfg.erase_max_patches,
-                area=cfg.erase_area,
-                drop_ratio=cfg.erase_drop_ratio,
-            ),
+            RandomErasing(p=cfg.erase_p, max_patches=cfg.erase_max_patches, area=cfg.erase_area),
             RandomHSV(hgain=cfg.strong_hsv_h, sgain=cfg.strong_hsv_s, vgain=cfg.strong_hsv_v),
             RandomGaussianBlur(p=cfg.blur_p, max_kernel=cfg.blur_max_kernel),
         ]
@@ -257,8 +264,9 @@ def build_pseudo_transforms(
 
     transforms = [
         affine,
-        *photometric,
         RandomFlip(direction="horizontal", p=cfg.fliplr),
+        TeacherView(),
+        *photometric,
         Format(
             bbox_format="xywh",
             normalize=True,
@@ -270,6 +278,7 @@ def build_pseudo_transforms(
             mask_overlap=True,
             bgr=0.0,
         ),
+        FormatTeacherView(),
     ]
     return Compose(transforms)
 
@@ -294,50 +303,27 @@ def build_val_transforms(imgsz: int = 640) -> Compose:
     )
 
 
-def split_pl_weight(sample: dict[str, Any]) -> dict[str, Any]:
-    """Split a (N, 2) [class_id, weight] `cls` tensor into `cls` (N, 1) and `pl_weight` (N,)."""
-    cls = sample["cls"]
-    if cls.ndim == 2 and cls.shape[1] == 2:
-        sample["cls"] = cls[:, :1].contiguous()
-        sample["pl_weight"] = cls[:, 1].contiguous().float()
-    else:
-        sample["pl_weight"] = torch.ones(cls.shape[0], dtype=torch.float32)
-    return sample
-
-
-class PseudoYOLODataset(YOLODataset):
+class UnlabeledDataset(YOLODataset):
     """
-    YOLO dataset tailored for dynamic pseudo-labeled pools.
-    Supports in-memory Polars DataFrame updates as well as disk .txt re-scans.
-    Supports filter_empty=True (only training on images with pseudo-labels).
-    Gracefully handles empty pseudo-label sets (len=0).
-    Label `cls` arrays are (N, 2): [class_id, per-box loss weight]. Every transform indexes
-    `cls` row-wise alongside the boxes, so the weight stays aligned through augmentation;
-    __getitem__ splits it back into `cls` (N, 1) and `pl_weight` (N,).
+    YOLO dataset over a changing list of unlabeled images (set each epoch with `set_images`).
+    Samples carry no boxes: the Teacher pseudo-labels them during training from their weak view
+    (`teacher_img`). Gracefully handles an empty image list (len=0).
     """
 
     def __init__(
         self,
         images_dir: Path | str,
-        labels_dir: Path | str,
         data: dict[str, Any] | None = None,
         imgsz: int = 640,
         hyp: SSODAugmentConfig | None = None,
-        filter_empty: bool = True,
         logger: logging.Logger | None = None,
     ) -> None:
         self.images_dir = Path(images_dir).resolve()
-        self.labels_dir = Path(labels_dir).resolve()
-        self.filter_empty = filter_empty
         self.logger = logger or get_logger()
         self.augment_cfg = hyp or SSODAugmentConfig()
-        self._cached_image_files: list[Path] | None = None
-        self._cached_stem_to_path: dict[str, Path] | None = None
+        self._image_files: list[Path] = []
 
         data_dict = data or {"names": {0: "object"}, "nc": 1}
-
-        # Initialize BaseDataset attributes without calling full YOLODataset.__init__ caching
-        # to support dynamic/empty initial state
         super().__init__(
             img_path=str(self.images_dir),
             imgsz=imgsz,
@@ -345,10 +331,7 @@ class PseudoYOLODataset(YOLODataset):
             task="detect",
             augment=True,
         )
-
-        # Build initial label index
-        self.reload(filter_empty=self.filter_empty)
-        self._sync_buffers()
+        self.set_images([])
 
     def _sync_buffers(self) -> None:
         """Synchronize BaseDataset image caching and dimension buffers to match current items."""
@@ -369,7 +352,7 @@ class PseudoYOLODataset(YOLODataset):
         """Load an image from dataset index 'i' with defensive bounds checking and buffer synchronization."""
         if i < 0 or i >= len(self.im_files):
             raise IndexError(
-                f"Index {i} out of bounds for PseudoYOLODataset with {len(self.im_files)} images."
+                f"Index {i} out of bounds for UnlabeledDataset with {len(self.im_files)} images."
             )
 
         if len(self.ims) != len(self.im_files) or len(self.npy_files) != len(
@@ -428,237 +411,55 @@ class PseudoYOLODataset(YOLODataset):
 
         return self.ims[i], self.im_hw0[i], self.im_hw[i]
 
-    def __getitem__(self, index: int) -> dict[str, Any]:
-        sample = super().__getitem__(index)
-        return split_pl_weight(sample)
+    def get_labels(self) -> list[dict[str, Any]]:
+        """Labels of the current image list (no boxes)."""
+        return [
+            {
+                "im_file": str(path),
+                "cls": np.empty((0, 1), dtype=np.float32),
+                "bboxes": np.empty((0, 4), dtype=np.float32),
+                "segments": [],
+                "keypoints": None,
+                "normalized": True,
+                "bbox_format": "xywh",
+            }
+            for path in self._image_files
+        ]
+
+    def set_images(self, image_files: Sequence[Path | str]) -> int:
+        """Replace the image list (e.g. with a fresh sample of the pool). Returns its length."""
+        self._image_files = [Path(p).resolve() for p in image_files]
+        self.labels = self.get_labels()
+        self.im_files = [label["im_file"] for label in self.labels]
+        self._sync_buffers()
+        return len(self.labels)
 
     @staticmethod
     def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
-        """YOLODataset collation plus `pl_weight` concatenated in box order."""
-        weights = [b.pop("pl_weight") for b in batch]
+        """YOLODataset collation plus stacked Teacher views and (M, 5) [image, x1, y1, x2, y2] erased patches."""
+        teacher_imgs, erase_boxes = split_teacher_inputs(batch)
         collated = YOLODataset.collate_fn(batch)
-        collated["pl_weight"] = torch.cat(weights, 0).float()
+        collated["teacher_img"] = teacher_imgs
+        collated["erase_boxes"] = erase_boxes
         return collated
 
-    def get_labels(self) -> list[dict[str, Any]]:
-        """Override standard label loading to load from self.labels_dir."""
-        return self._load_labels_from_disk(filter_empty=self.filter_empty)
 
-    def _find_image_files(self) -> list[Path]:
-        if self._cached_image_files is not None:
-            return self._cached_image_files
-        if not self.images_dir.exists():
-            self._cached_image_files = []
-            return []
-        self._cached_image_files = sorted(
-            [
-                p
-                for p in self.images_dir.rglob("*")
-                if p.is_file() and p.suffix.lower() in VALID_IMAGE_EXTS
-            ]
-        )
-        return self._cached_image_files
-
-    def _get_stem_to_path_map(self) -> dict[str, Path]:
-        if self._cached_stem_to_path is not None:
-            return self._cached_stem_to_path
-        self._cached_stem_to_path = {p.stem: p for p in self._find_image_files()}
-        return self._cached_stem_to_path
-
-    def clear_cache(self) -> None:
-        self._cached_image_files = None
-        self._cached_stem_to_path = None
-
-    def _load_labels_from_disk(self, filter_empty: bool = True) -> list[dict[str, Any]]:
-        img_files = self._find_image_files()
-        labels_list: list[dict[str, Any]] = []
-        im_files_list: list[str] = []
-
-        for img_path in img_files:
-            rel = img_path.relative_to(self.images_dir)
-            label_path = self.labels_dir / rel.with_suffix(".txt")
-
-            boxes: list[list[float]] = []
-            classes: list[int] = []
-            weights: list[float] = []
-
-            if label_path.exists() and label_path.is_file():
-                content = label_path.read_text(encoding="utf-8").strip()
-                if content:
-                    for line in content.splitlines():
-                        parts = line.strip().split()
-                        if len(parts) >= 5:
-                            cls_id = int(float(parts[0]))
-                            xc, yc, w, h = (float(v) for v in parts[1:5])
-                            classes.append(cls_id)
-                            boxes.append([xc, yc, w, h])
-                            weights.append(float(parts[5]) if len(parts) >= 6 else 1.0)
-
-            if filter_empty and len(boxes) == 0:
-                continue
-
-            # Read image shape (fast header or imread fallback)
-            im = cv2.imread(str(img_path))
-            if im is None:
-                continue
-            h, w = im.shape[:2]
-
-            cls_arr = (
-                np.stack([classes, weights], axis=1).astype(np.float32)
-                if classes
-                else np.empty((0, 2), dtype=np.float32)
-            )
-            box_arr = (
-                np.array(boxes, dtype=np.float32).reshape(-1, 4)
-                if boxes
-                else np.empty((0, 4), dtype=np.float32)
-            )
-
-            record = {
-                "im_file": str(img_path),
-                "shape": (h, w),
-                "cls": cls_arr,
-                "bboxes": box_arr,
-                "segments": [],
-                "keypoints": None,
-                "normalized": True,
-                "bbox_format": "xywh",
-            }
-            labels_list.append(record)
-            im_files_list.append(str(img_path))
-
-        self.labels = labels_list
-        self.im_files = im_files_list
-        self._sync_buffers()
-        return labels_list
-
-    def load_from_dataframe(
-        self,
-        df: pl.DataFrame,
-        filter_empty: bool = True,
-    ) -> list[dict[str, Any]]:
-        """
-        Populate dataset labels directly from an in-memory Polars DataFrame.
-        Expected schema columns: 'image_stem' or 'label_path', 'class_id',
-        'x_center', 'y_center', 'w_norm', 'h_norm', 'img_width', 'img_height'.
-        """
-        all_imgs = self._get_stem_to_path_map()
-        labels_list: list[dict[str, Any]] = []
-        im_files_list: list[str] = []
-
-        if len(df) == 0:
-            if not filter_empty:
-                for stem, img_path in all_imgs.items():
-                    im = cv2.imread(str(img_path))
-                    if im is None:
-                        continue
-                    h, w = im.shape[:2]
-                    record = {
-                        "im_file": str(img_path),
-                        "shape": (h, w),
-                        "cls": np.empty((0, 2), dtype=np.float32),
-                        "bboxes": np.empty((0, 4), dtype=np.float32),
-                        "segments": [],
-                        "keypoints": None,
-                        "normalized": True,
-                        "bbox_format": "xywh",
-                    }
-                    labels_list.append(record)
-                    im_files_list.append(str(img_path))
-            self.labels = labels_list
-            self.im_files = im_files_list
-            self._sync_buffers()
-            return labels_list
-
-        detected_stems = set()
-        for keys, group_df in df.group_by("image_stem"):
-            stem = (
-                keys[0]
-                if isinstance(keys, tuple)
-                else (keys if isinstance(keys, str) else group_df["image_stem"][0])
-            )
-
-            img_path = all_imgs.get(stem)
-            if img_path is None:
-                continue
-
-            detected_stems.add(stem)
-            img_width = group_df["img_width"][0]
-            img_height = group_df["img_height"][0]
-
-            weights = (
-                group_df["weight"].to_numpy()
-                if "weight" in group_df.columns
-                else np.ones(len(group_df))
-            )
-            classes = np.stack(
-                [group_df["class_id"].to_numpy(), weights], axis=1
-            ).astype(np.float32)
-            xc = group_df["x_center"].to_numpy().astype(np.float32)
-            yc = group_df["y_center"].to_numpy().astype(np.float32)
-            wn = group_df["w_norm"].to_numpy().astype(np.float32)
-            hn = group_df["h_norm"].to_numpy().astype(np.float32)
-            bboxes = np.stack([xc, yc, wn, hn], axis=1)
-
-            record = {
-                "im_file": str(img_path),
-                "shape": (int(img_height), int(img_width)),
-                "cls": classes,
-                "bboxes": bboxes,
-                "segments": [],
-                "keypoints": None,
-                "normalized": True,
-                "bbox_format": "xywh",
-            }
-            labels_list.append(record)
-            im_files_list.append(str(img_path))
-
-        if not filter_empty:
-            for stem, img_path in all_imgs.items():
-                if stem not in detected_stems:
-                    im = cv2.imread(str(img_path))
-                    if im is None:
-                        continue
-                    h, w = im.shape[:2]
-                    record = {
-                        "im_file": str(img_path),
-                        "shape": (h, w),
-                        "cls": np.empty((0, 2), dtype=np.float32),
-                        "bboxes": np.empty((0, 4), dtype=np.float32),
-                        "segments": [],
-                        "keypoints": None,
-                        "normalized": True,
-                        "bbox_format": "xywh",
-                    }
-                    labels_list.append(record)
-                    im_files_list.append(str(img_path))
-
-        self.labels = labels_list
-        self.im_files = im_files_list
-        self._sync_buffers()
-        return labels_list
-
-    def reload(
-        self,
-        labels_dir: Path | str | None = None,
-        filtered_df: pl.DataFrame | None = None,
-        filter_empty: bool | None = None,
-    ) -> int:
-        """
-        Refresh pseudo-labels either from an in-memory DataFrame or from disk .txt files.
-        Returns the number of loaded pseudo-labeled images.
-        """
-        if labels_dir is not None:
-            self.labels_dir = Path(labels_dir).resolve()
-        if filter_empty is not None:
-            self.filter_empty = filter_empty
-
-        if filtered_df is not None:
-            self.load_from_dataframe(filtered_df, filter_empty=self.filter_empty)
-        else:
-            self._load_labels_from_disk(filter_empty=self.filter_empty)
-
-        return len(self.labels)
+def split_teacher_inputs(batch: list[dict[str, Any]]) -> tuple[torch.Tensor | None, torch.Tensor]:
+    """
+    Pop the Teacher views and erased patches of a batch's unlabeled samples: the views stacked
+    in batch order (None without unlabeled samples) and the patches as (M, 5)
+    [batch index, x1, y1, x2, y2].
+    """
+    teacher_imgs = [b.pop("teacher_img") for b in batch if "teacher_img" in b]
+    patches = [
+        torch.cat([torch.full((len(p), 1), float(i)), p.float()], dim=1)
+        for i, b in enumerate(batch)
+        if (p := b.pop("erase_boxes", None)) is not None
+    ]
+    return (
+        torch.stack(teacher_imgs) if teacher_imgs else None,
+        torch.cat(patches) if patches else torch.zeros((0, 5)),
+    )
 
 
 class SSODSampler(Sampler[int]):
@@ -753,15 +554,15 @@ class SSODDataset(Dataset):
     """
     Combined PyTorch Dataset for SSOD training.
 
-    Wraps Ground-Truth dataset and Pseudo-Labeled dataset, coordinating
-    separate augmentation pipelines (Mosaic on GT, no Mosaic on Pseudo),
-    dynamic pseudo-label reloading, and sample source tracking (`is_pseudo`).
+    Wraps Ground-Truth dataset and unlabeled dataset, coordinating
+    separate augmentation pipelines (Mosaic on GT, no Mosaic and a weak Teacher view on
+    unlabeled images) and sample source tracking (`is_pseudo`).
     """
 
     def __init__(
         self,
         gt_dataset: YOLODataset,
-        pl_dataset: PseudoYOLODataset,
+        pl_dataset: UnlabeledDataset,
         augment_cfg: SSODAugmentConfig | None = None,
         imgsz: int = 640,
     ) -> None:
@@ -779,7 +580,7 @@ class SSODDataset(Dataset):
         self.transforms_gt_closed = build_gt_transforms(
             gt_dataset, imgsz=imgsz, hyp=self.augment_cfg, mosaic=False
         )
-        self.transforms_pl = build_pseudo_transforms(
+        self.transforms_pl = build_unlabeled_transforms(
             pl_dataset, imgsz=imgsz, hyp=self.augment_cfg
         )
 
@@ -797,20 +598,6 @@ class SSODDataset(Dataset):
         self.gt_dataset.transforms = self.transforms_gt_open
         self.is_mosaic_closed = False
 
-    def reload_pseudo_labels(
-        self,
-        labels_dir: Path | str | None = None,
-        filtered_df: pl.DataFrame | None = None,
-        filter_empty: bool = True,
-    ) -> int:
-        """Refresh pseudo-labels in pl_dataset."""
-        count = self.pl_dataset.reload(
-            labels_dir=labels_dir,
-            filtered_df=filtered_df,
-            filter_empty=filter_empty,
-        )
-        return count
-
     def __len__(self) -> int:
         return len(self.gt_dataset) + len(self.pl_dataset)
 
@@ -824,35 +611,32 @@ class SSODDataset(Dataset):
             sample = self.pl_dataset[index - n_gt]
             sample["is_pseudo"] = True
             sample["source"] = 1  # 1 for Pseudo
-        if "pl_weight" not in sample:
-            sample["pl_weight"] = torch.ones(sample["cls"].shape[0], dtype=torch.float32)
         return sample
 
     @staticmethod
     def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
         """
-        Collate batch items into standard Ultralytics YOLO tensors while
-        preserving `is_pseudo` and `source` tensors for Mean Teacher loss.
+        Collate batch items into standard Ultralytics YOLO tensors while preserving the
+        `is_pseudo` and `source` tensors for the Mean Teacher loss, the stacked Teacher views of
+        the unlabeled samples (`teacher_img`, in batch order; None without unlabeled samples),
+        their erased patches (`erase_boxes`, (M, 5) [batch index, x1, y1, x2, y2]) and GT box
+        weights of 1 (`pl_weight`; pseudo boxes are appended by the labeler).
         """
         is_pseudo_list = [b["is_pseudo"] for b in batch]
         source_list = [b["source"] for b in batch]
-        weight_list = [
-            b.get("pl_weight", torch.ones(b["cls"].shape[0], dtype=torch.float32))
-            for b in batch
-        ]
 
         # Strip custom metadata keys before calling standard YOLODataset.collate_fn
-        standard_batch = []
-        for b in batch:
-            clean = {
-                k: v for k, v in b.items() if k not in {"is_pseudo", "source", "pl_weight"}
-            }
-            standard_batch.append(clean)
+        standard_batch = [
+            {k: v for k, v in b.items() if k not in {"is_pseudo", "source"}} for b in batch
+        ]
+        teacher_imgs, erase_boxes = split_teacher_inputs(standard_batch)
 
         collated = YOLODataset.collate_fn(standard_batch)
         collated["is_pseudo"] = torch.tensor(is_pseudo_list, dtype=torch.bool)
         collated["source"] = torch.tensor(source_list, dtype=torch.long)
-        collated["pl_weight"] = torch.cat(weight_list, 0).float()  # aligned with bboxes
+        collated["teacher_img"] = teacher_imgs
+        collated["erase_boxes"] = erase_boxes
+        collated["pl_weight"] = torch.ones(collated["cls"].shape[0], dtype=torch.float32)
         return collated
 
 
@@ -862,10 +646,9 @@ class SSODDatasetHandler:
 
     Coordinates:
     - GT Train dataset & GT Val dataset
-    - Pseudo-labeled Train dataset
-    - SSODSampler with GT + PL shuffled sequencing (optional GT tail)
+    - Unlabeled Train dataset (a fresh image list every epoch)
+    - SSODSampler with GT + unlabeled shuffled sequencing (optional GT tail)
     - Automatic mosaic closing during the last 10% of epochs
-    - Dynamic pseudo-label reloading at epoch boundaries
     """
 
     def __init__(
@@ -876,7 +659,6 @@ class SSODDatasetHandler:
         gt_val_images: Path | str | None = None,
         gt_val_labels: Path | str | None = None,
         pl_images_dir: Path | str | None = None,
-        pl_labels_dir: Path | str | None = None,
         class_names: dict[int, str] | list[str] | None = None,
         imgsz: int = 640,
         batch_size: int = 10,
@@ -885,7 +667,6 @@ class SSODDatasetHandler:
         augment_cfg: SSODAugmentConfig | None = None,
         tail_ratio: float = 0.0,
         close_mosaic_ratio: float = 0.10,
-        filter_empty_pseudo: bool = True,
         gt_repeat: int = 1,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -899,7 +680,6 @@ class SSODDatasetHandler:
         )
         self.tail_ratio = tail_ratio
         self.close_mosaic_ratio = close_mosaic_ratio
-        self.filter_empty_pseudo = filter_empty_pseudo
 
         # Resolve paths & class metadata
         data_cfg = self._resolve_data_config(
@@ -909,14 +689,12 @@ class SSODDatasetHandler:
             gt_val_images=gt_val_images,
             gt_val_labels=gt_val_labels,
             pl_images_dir=pl_images_dir,
-            pl_labels_dir=pl_labels_dir,
             class_names=class_names,
         )
 
         self.gt_train_images = data_cfg["gt_train_images"]
         self.gt_val_images = data_cfg["gt_val_images"]
         self.pl_images_dir = data_cfg["pl_images_dir"]
-        self.pl_labels_dir = data_cfg["pl_labels_dir"]
         self.data_dict = data_cfg["data_dict"]
 
         # 1. Initialize Ground-Truth Train Dataset
@@ -947,17 +725,13 @@ class SSODDatasetHandler:
             )
             self.val_dataset.transforms = build_val_transforms(self.imgsz)
 
-        # 3. Initialize Pseudo-Labeled Dataset
-        self.logger.info(
-            f"Initializing Pseudo-Labeled Dataset (images={self.pl_images_dir}, labels={self.pl_labels_dir})..."
-        )
-        self.pl_dataset = PseudoYOLODataset(
+        # 3. Initialize Unlabeled Dataset (empty until the first `set_pl_images`)
+        self.logger.info(f"Initializing Unlabeled Dataset (images={self.pl_images_dir})...")
+        self.pl_dataset = UnlabeledDataset(
             images_dir=self.pl_images_dir,
-            labels_dir=self.pl_labels_dir,
             data=self.data_dict,
             imgsz=self.imgsz,
             hyp=self.augment_cfg,
-            filter_empty=self.filter_empty_pseudo,
             logger=self.logger,
         )
 
@@ -980,7 +754,7 @@ class SSODDatasetHandler:
 
         self.logger.info(
             f"SSOD Dataset initialized: {len(self.gt_train_dataset)} GT train items, "
-            f"{len(self.pl_dataset)} initial pseudo items (total={len(self.train_dataset)})."
+            f"{len(self.pl_dataset)} initial unlabeled items (total={len(self.train_dataset)})."
         )
 
     def _resolve_data_config(
@@ -991,7 +765,6 @@ class SSODDatasetHandler:
         gt_val_images: Path | str | None,
         gt_val_labels: Path | str | None,
         pl_images_dir: Path | str | None,
-        pl_labels_dir: Path | str | None,
         class_names: dict[int, str] | list[str] | None,
     ) -> dict[str, Any]:
         """Resolve dataset configuration from YAML or explicit path arguments."""
@@ -1044,44 +817,24 @@ class SSODDatasetHandler:
 
         if pl_images_dir is None:
             raise ValueError(
-                "Pseudo-labeled images dir (pl_images_dir) must be specified."
+                "Unlabeled images dir (pl_images_dir) must be specified."
             )
-        resolved_pl_images = Path(pl_images_dir).resolve()
-
-        if pl_labels_dir is not None:
-            resolved_pl_labels = Path(pl_labels_dir).resolve()
-        else:
-            resolved_pl_labels = resolved_pl_images.parent / "labels"
 
         return {
             "gt_train_images": resolved_gt_train,
             "gt_val_images": resolved_gt_val,
-            "pl_images_dir": resolved_pl_images,
-            "pl_labels_dir": resolved_pl_labels,
+            "pl_images_dir": Path(pl_images_dir).resolve(),
             "data_dict": data_dict,
         }
 
-    def reload_pseudo_labels(
-        self,
-        labels_dir: Path | str | None = None,
-        filtered_df: pl.DataFrame | None = None,
-        filter_empty: bool | None = None,
-    ) -> int:
-        """
-        Reload pseudo-labels dynamically for the current epoch and synchronize the sampler.
-        """
-        count = self.train_dataset.reload_pseudo_labels(
-            labels_dir=labels_dir,
-            filtered_df=filtered_df,
-            filter_empty=self.filter_empty_pseudo
-            if filter_empty is None
-            else filter_empty,
-        )
+    def set_pl_images(self, image_files: Sequence[Path | str]) -> int:
+        """Set the unlabeled images of the current epoch and synchronize the sampler."""
+        count = self.pl_dataset.set_images(image_files)
         self.sampler.update_lengths(
             gt_len=len(self.gt_train_dataset), pl_len=len(self.pl_dataset)
         )
         self.logger.info(
-            f"Reloaded pseudo-labels: {count} active pseudo images. "
+            f"Unlabeled images this epoch: {count}. "
             f"Total epoch dataset length: {len(self.train_dataset)}."
         )
         return count
@@ -1143,6 +896,20 @@ class SSODDatasetHandler:
             collate_fn=SSODDataset.collate_fn,
             drop_last=drop_last,
             persistent_workers=persistent_workers and (self.workers > 0),
+        )
+
+    def get_unlabeled_loader(self, pin_memory: bool = True) -> DataLoader:
+        """
+        DataLoader over the current unlabeled images alone, with the same transforms as in
+        training (used to build the initial score histograms from the Teacher views).
+        """
+        return DataLoader(
+            dataset=self.pl_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.workers,
+            pin_memory=pin_memory and torch.cuda.is_available(),
+            collate_fn=UnlabeledDataset.collate_fn,
         )
 
     def get_val_loader(

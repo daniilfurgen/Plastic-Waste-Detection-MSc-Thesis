@@ -5,12 +5,12 @@ VectorizedEMA precision, and model integrity without dtype or BatchNorm corrupti
 
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
-import polars as pl
 import pytest
 import torch
 import torch.nn as nn
@@ -100,7 +100,6 @@ def env(tmp_path, yolo26n_path, device, make_image, make_label):
                 "warmup_weights": Path(yolo26n_path),
                 "gt_data_yaml": gt_yaml,
                 "pl_images_dir": pl_images_dir,
-                "pl_labels_dir": tmp_path / "pl_labels",
                 "coco_gt_path": coco_gt,
                 "warmup_epochs": 0,
                 "batch_size": 2,
@@ -153,28 +152,43 @@ class TestMultiEpochTransitions:
         dtypes = {p.dtype for p in saved_teacher.model.parameters()}
         assert torch.float32 in dtypes
 
-    def test_save_candidates_parquet_per_epoch(self, env):
+    def test_histograms_logged_and_checkpointed(self, env):
         """
-        Run 2 SSL epochs with save_candidates=True:
-        - Verifies that <runs_dir>/candidates/ directory is created.
-        - Verifies that candidates_epoch_1.parquet and candidates_epoch_2.parquet are saved.
-        - Reads parquet files with Polars and asserts expected schema columns.
+        Run 2 SSL epochs: the initial (epoch 0) and per-epoch histograms are logged to
+        histograms.csv, every step's raw counts to histograms/epoch_<k>.npz, and the histogram
+        EMA can be replayed from them; the rich checkpoint carries the histogram state.
         """
-        cfg = env.make_config(ssl_epochs=2, save_candidates=True, experiment_name="test_cand_parquet")
+        from ssod.pseudo_labeling import SIZE_BINS, ScoreHistograms
+
+        cfg = env.make_config(ssl_epochs=2, experiment_name="test_histograms")
         MeanTeacherTrainer(config=cfg).train_mean_teacher(warmup_weights=env.weights)
+        exp_dir = env.runs_dir / "test_histograms"
 
-        cand_dir = env.runs_dir / "test_cand_parquet" / "candidates"
-        assert cand_dir.exists(), "Candidates directory was not created!"
+        with open(exp_dir / "histograms.csv", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        assert {int(r["epoch"]) for r in rows} == {0, 1, 2}
+        assert {r["size_bin"] for r in rows} == set(SIZE_BINS)
 
-        expected_cols = [
-            "image_stem", "label_path", "img_width", "img_height", "class_id", "score",
-            "x1", "y1", "x2", "y2", "w", "h", "size_bin",
-        ]
+        def ema(epoch: int) -> np.ndarray:
+            return np.array([
+                [float(r["ema"]) for r in rows if int(r["epoch"]) == epoch and r["size_bin"] == b]
+                for b in SIZE_BINS
+            ])
+
+        replay = ScoreHistograms(conf_floor=cfg.pseudo_conf, fallback=cfg.pseudo_fallback_threshold)
+        replay.densities = dict(zip(SIZE_BINS, ema(0)))
         for epoch in (1, 2):
-            p_file = cand_dir / f"candidates_epoch_{epoch}.parquet"
-            assert p_file.exists(), f"{p_file} does not exist!"
-            df = pl.read_parquet(p_file)
-            for col in expected_cols:
-                assert col in df.columns
-            if len(df) > 0:
-                assert all(0.0 <= s <= 1.0 for s in df["score"].to_list())
+            steps = np.load(exp_dir / "histograms" / f"epoch_{epoch}.npz")
+            assert steps["counts"].shape[1:] == (len(SIZE_BINS), replay.n_bins)
+            assert len(steps["thresholds"]) == len(steps["counts"]) > 0
+            for counts in steps["counts"]:
+                replay.update(counts, decay=cfg.ema_decay)
+            np.testing.assert_allclose(np.stack(list(replay.densities.values())), ema(epoch), rtol=1e-6, atol=1e-9)
+
+        with open(exp_dir / "results.csv", encoding="utf-8") as f:
+            header = next(csv.reader(f))
+        for column in ("pl_images", "pl_boxes", "threshold/small", "object_mode/small", "pl_share/small"):
+            assert column in header
+
+        checkpoint = torch.load(exp_dir / "weights" / "last_checkpoint.pt", weights_only=False)
+        assert set(checkpoint["score_histograms"]) == set(SIZE_BINS)

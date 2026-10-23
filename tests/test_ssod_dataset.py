@@ -9,7 +9,6 @@ from typing import Any
 from unittest import mock
 
 import numpy as np
-import polars as pl
 import pytest
 import torch
 from torch.utils.data import DataLoader
@@ -23,20 +22,19 @@ from ultralytics.data.augment import (
     RandomPerspective,
 )
 from ultralytics.data.dataset import YOLODataset
-from ultralytics.utils.instance import Instances
 
 from ssod.dataset import (
-    BoxAwareRandomErasing,
-    PseudoYOLODataset,
+    RandomErasing,
     RandomGaussianBlur,
     SSODAugmentConfig,
     SSODDataset,
     SSODDatasetHandler,
     SSODSampler,
+    TeacherView,
+    UnlabeledDataset,
     build_gt_transforms,
-    build_pseudo_transforms,
+    build_unlabeled_transforms,
     build_val_transforms,
-    split_pl_weight,
 )
 
 
@@ -47,6 +45,10 @@ def _has_transform(transforms_obj: Any, cls_type: type) -> bool:
     if hasattr(transforms_obj, "transforms"):
         return any(_has_transform(t, cls_type) for t in transforms_obj.transforms)
     return False
+
+
+def _transform_types(transforms_obj: Any) -> list[type]:
+    return [type(t) for t in transforms_obj.transforms]
 
 
 class DummyDataset:
@@ -73,39 +75,36 @@ class TestSSODTransforms:
         for expected in (RandomPerspective, RandomHSV, RandomFlip):
             assert _has_transform(transforms, expected)
 
-    def test_pseudo_transforms_never_include_mosaic(self):
-        transforms = build_pseudo_transforms(DummyDataset(), imgsz=640, hyp=SSODAugmentConfig(mosaic=1.0))
-        assert not _has_transform(transforms, Mosaic), "Pseudo transforms must NEVER include Mosaic"
-        for expected in (RandomPerspective, RandomHSV, RandomFlip):
+    def test_unlabeled_transforms_never_include_mosaic(self):
+        transforms = build_unlabeled_transforms(DummyDataset(), imgsz=640, hyp=SSODAugmentConfig(mosaic=1.0))
+        assert not _has_transform(transforms, Mosaic), "Unlabeled transforms must NEVER include Mosaic"
+        for expected in (RandomPerspective, RandomHSV, RandomFlip, TeacherView):
             assert _has_transform(transforms, expected)
 
-    def test_pseudo_weak_transforms_have_no_strong_augmentation(self):
-        weak = build_pseudo_transforms(DummyDataset(), imgsz=640, hyp=SSODAugmentConfig())
-        assert not _has_transform(weak, RandomGaussianBlur)
-        assert not _has_transform(weak, BoxAwareRandomErasing)
+    def test_teacher_view_after_geometry_before_photometric(self):
+        for cfg in (SSODAugmentConfig(), SSODAugmentConfig(pl_strong=True)):
+            types = _transform_types(build_unlabeled_transforms(DummyDataset(), imgsz=640, hyp=cfg))
+            teacher = types.index(TeacherView)
+            assert types.index(RandomPerspective) < teacher
+            assert types.index(RandomFlip) < teacher
+            assert teacher < types.index(RandomHSV)
 
-    def test_pseudo_strong_transforms(self):
-        strong = build_pseudo_transforms(DummyDataset(), imgsz=640, hyp=SSODAugmentConfig(pl_strong=True))
+    def test_unlabeled_weak_transforms_have_no_strong_augmentation(self):
+        weak = build_unlabeled_transforms(DummyDataset(), imgsz=640, hyp=SSODAugmentConfig())
+        assert not _has_transform(weak, RandomGaussianBlur)
+        assert not _has_transform(weak, RandomErasing)
+
+    def test_unlabeled_strong_transforms(self):
+        strong = build_unlabeled_transforms(DummyDataset(), imgsz=640, hyp=SSODAugmentConfig(pl_strong=True))
         assert not _has_transform(strong, Mosaic)
         assert _has_transform(strong, RandomGaussianBlur)
-        assert _has_transform(strong, BoxAwareRandomErasing)
+        assert _has_transform(strong, RandomErasing)
         assert _has_transform(strong, RandomFlip)
 
-    def test_box_aware_erasing_drops_only_covered_boxes(self):
+    def test_erasing_records_patches(self):
         img = np.zeros((100, 100, 3), dtype=np.uint8)
-        boxes = np.array([[10, 10, 30, 30], [60, 60, 90, 90]], dtype=np.float32)
-        labels = {
-            "img": img,
-            "cls": np.array([[0.0], [0.0]], dtype=np.float32),
-            "instances": Instances(
-                boxes,
-                segments=np.zeros((0, 1000, 2), dtype=np.float32),
-                bbox_format="xyxy",
-                normalized=False,
-            ),
-        }
-        erasing = BoxAwareRandomErasing(p=1.0, max_patches=1, area=(0.3, 0.3), drop_ratio=0.5)
-        # Force a single square patch (~55x55) anchored at (0, 0): covers box 1, misses box 2
+        erasing = RandomErasing(p=1.0, max_patches=1, area=(0.3, 0.3))
+        # Force a single square patch (~55x55) anchored at (0, 0)
         original_randint = np.random.randint
 
         def fixed_randint(low, high=None, size=None, dtype=int):
@@ -117,12 +116,13 @@ class TestSSODTransforms:
             mock.patch.object(np.random, "randint", side_effect=fixed_randint),
             mock.patch.object(np.random, "uniform", side_effect=lambda a, b: 0.0 if a < 0 else a),
         ):
-            out = erasing(labels)
+            out = erasing({"img": img})
 
-        assert len(out["instances"]) == len(out["cls"])
-        kept = out["instances"].bboxes.tolist()
-        assert [10.0, 10.0, 30.0, 30.0] not in kept, "Box under the patch must be dropped"
-        assert [60.0, 60.0, 90.0, 90.0] in kept, "Box outside the patch must be kept"
+        assert out["erase_boxes"].tolist() == [[0.0, 0.0, 55.0, 55.0]]
+
+    def test_erasing_skipped_records_no_patches(self):
+        out = RandomErasing(p=0.0)({"img": np.zeros((10, 10, 3), dtype=np.uint8)})
+        assert out["erase_boxes"].shape == (0, 4)
 
     def test_val_transforms_only_letterbox_and_format(self):
         transforms = build_val_transforms(imgsz=640)
@@ -210,7 +210,7 @@ class TestSSODSampler:
 
 @pytest.fixture
 def dirs(tmp_path, make_image, make_label):
-    """Synthetic GT (4 train / 2 val) and pseudo (3 images, 2 labelled) dataset layout."""
+    """Synthetic GT (4 train / 2 val) dataset and an unlabeled pool of 3 images."""
     layout = SimpleNamespace(
         root=tmp_path,
         gt_train_img=tmp_path / "gt" / "images" / "train",
@@ -218,7 +218,6 @@ def dirs(tmp_path, make_image, make_label):
         gt_val_img=tmp_path / "gt" / "images" / "val",
         gt_val_lbl=tmp_path / "gt" / "labels" / "val",
         pl_img=tmp_path / "pseudo" / "images",
-        pl_lbl=tmp_path / "pseudo" / "labels",
     )
     for i in range(4):
         make_image(layout.gt_train_img / f"gt_train_{i}.jpg", width=128, height=128)
@@ -226,50 +225,100 @@ def dirs(tmp_path, make_image, make_label):
     for i in range(2):
         make_image(layout.gt_val_img / f"gt_val_{i}.jpg", width=128, height=128)
         make_label(layout.gt_val_lbl / f"gt_val_{i}.txt", ["0 0.5 0.5 0.3 0.3"])
+    layout.pl_files = []
     for i in range(3):
-        make_image(layout.pl_img / f"pseudo_{i}.jpg", width=128, height=128)
-    make_label(layout.pl_lbl / "pseudo_0.txt", ["0 0.2 0.2 0.1 0.1"])
-    make_label(layout.pl_lbl / "pseudo_1.txt", ["0 0.4 0.4 0.2 0.2"])
-    # pseudo_2 has no label file initially
+        make_image(layout.pl_img / f"pseudo_{i}.jpg", width=128, height=96)
+        layout.pl_files.append(layout.pl_img / f"pseudo_{i}.jpg")
     return layout
 
 
-@pytest.fixture
-def empty_pl_lbl(dirs):
-    path = dirs.root / "empty_pseudo_labels"
-    path.mkdir()
-    return path
+def _unlabeled(dirs, cfg: SSODAugmentConfig | None = None, imgsz: int = 128) -> UnlabeledDataset:
+    cfg = cfg or SSODAugmentConfig()
+    ds = UnlabeledDataset(images_dir=dirs.pl_img, imgsz=imgsz, hyp=cfg)
+    ds.transforms = build_unlabeled_transforms(ds, imgsz=imgsz, hyp=cfg)
+    return ds
 
 
-@pytest.fixture
-def populate_pl_labels(make_label):
-    """Write label files for pseudo_1 and pseudo_2 into the given directory."""
+class TestUnlabeledDataset:
+    """Unlabeled samples: no boxes, a weak Teacher view with the Student's geometry."""
 
-    def _populate(directory):
-        make_label(directory / "pseudo_1.txt", ["0 0.5 0.5 0.2 0.2"])
-        make_label(directory / "pseudo_2.txt", ["0 0.6 0.6 0.3 0.3"])
+    def test_starts_empty_and_follows_image_list(self, dirs):
+        ds = _unlabeled(dirs)
+        assert len(ds) == 0
+        assert len(ds.ims) == len(ds.npy_files) == 0
 
-    return _populate
+        assert ds.set_images(dirs.pl_files[1:]) == 2
+        assert ds.im_files == [str(p) for p in dirs.pl_files[1:]]
+        assert len(ds.ims) == len(ds.npy_files) == len(ds.im_hw0) == len(ds.im_hw) == 2
+        assert ds.set_images(dirs.pl_files) == 3
+
+    def test_sample_has_teacher_view_and_no_boxes(self, dirs):
+        ds = _unlabeled(dirs)
+        ds.set_images(dirs.pl_files)
+        sample = ds[0]
+        assert sample["bboxes"].shape == (0, 4)
+        assert sample["teacher_img"].shape == sample["img"].shape == (3, 128, 128)
+        assert sample["teacher_img"].dtype == torch.uint8
+        assert sample["erase_boxes"].shape == (0, 4)
+
+    def test_teacher_view_shares_geometry_without_photometric_changes(self, dirs):
+        # Without colour jitter both views are identical, flips and affine included
+        cfg = SSODAugmentConfig(hsv_h=0.0, hsv_s=0.0, hsv_v=0.0, fliplr=0.5)
+        ds = _unlabeled(dirs, cfg)
+        ds.set_images(dirs.pl_files)
+        np.random.seed(0)
+        for i in range(len(ds)):
+            sample = ds[i]
+            assert torch.equal(sample["img"], sample["teacher_img"])
+
+        # With colour jitter only the Student view changes
+        ds = _unlabeled(dirs, SSODAugmentConfig(hsv_v=0.9))
+        ds.set_images(dirs.pl_files)
+        assert any(not torch.equal(ds[i]["img"], ds[i]["teacher_img"]) for i in range(len(ds)))
+
+    def test_erased_patches_only_in_student_view(self, dirs):
+        cfg = SSODAugmentConfig(
+            pl_strong=True, erase_p=1.0, blur_p=0.0, strong_hsv_h=0.0, strong_hsv_s=0.0, strong_hsv_v=0.0,
+        )
+        ds = _unlabeled(dirs, cfg)
+        ds.set_images(dirs.pl_files)
+        sample = ds[0]
+        assert len(sample["erase_boxes"]) > 0
+        outside = torch.ones(sample["img"].shape[1:], dtype=torch.bool)
+        for x1, y1, x2, y2 in sample["erase_boxes"].long().tolist():
+            outside[y1:y2, x1:x2] = False
+        assert torch.equal(sample["img"][:, outside], sample["teacher_img"][:, outside])
+        assert not torch.equal(sample["img"], sample["teacher_img"])
+
+    def test_collate_stacks_teacher_views_and_patches(self, dirs):
+        cfg = SSODAugmentConfig(pl_strong=True, erase_p=1.0)
+        ds = _unlabeled(dirs, cfg)
+        ds.set_images(dirs.pl_files)
+        batch = next(iter(DataLoader(ds, batch_size=3, collate_fn=UnlabeledDataset.collate_fn)))
+        assert batch["teacher_img"].shape == (3, 3, 128, 128)
+        assert batch["erase_boxes"].shape[1] == 5
+        assert set(batch["erase_boxes"][:, 0].tolist()) <= {0.0, 1.0, 2.0}
+
+    @pytest.mark.slow
+    def test_multiprocessing_dataloader_after_set_images(self, dirs):
+        ds = _unlabeled(dirs, imgsz=640)
+        ds.set_images(dirs.pl_files[:2])
+        loader = DataLoader(
+            ds, batch_size=2, num_workers=2, collate_fn=ds.collate_fn, persistent_workers=False
+        )
+        batches = list(loader)
+        assert len(batches) == 1
+        assert batches[0]["img"].shape == batches[0]["teacher_img"].shape == (2, 3, 640, 640)
 
 
 class TestSSODDatasetIntegration:
     """End-to-end integration tests with synthetic image & label files."""
 
-    def test_pseudo_dataset_filter_empty(self, dirs):
-        # With filter_empty=True, only pseudo_0 and pseudo_1 are included
-        pl_ds = PseudoYOLODataset(images_dir=dirs.pl_img, labels_dir=dirs.pl_lbl, filter_empty=True)
-        assert len(pl_ds) == 2
-
-        # With filter_empty=False, all 3 images are included
-        pl_ds_all = PseudoYOLODataset(images_dir=dirs.pl_img, labels_dir=dirs.pl_lbl, filter_empty=False)
-        assert len(pl_ds_all) == 3
-
     def test_ssod_dataset_item_access_and_collate(self, dirs):
         data = {"names": {0: "waste"}, "nc": 1}
         gt_ds = YOLODataset(img_path=str(dirs.gt_train_img), imgsz=128, data=data, augment=True)
-        pl_ds = PseudoYOLODataset(
-            images_dir=dirs.pl_img, labels_dir=dirs.pl_lbl, data=data, imgsz=128, filter_empty=True
-        )
+        pl_ds = UnlabeledDataset(images_dir=dirs.pl_img, data=data, imgsz=128)
+        pl_ds.set_images(dirs.pl_files[:2])
 
         ssod_ds = SSODDataset(gt_dataset=gt_ds, pl_dataset=pl_ds, imgsz=128)
         assert len(ssod_ds) == 4 + 2
@@ -277,38 +326,30 @@ class TestSSODDatasetIntegration:
         item_gt = ssod_ds[0]
         assert not item_gt["is_pseudo"]
         assert item_gt["source"] == 0
-        assert "img" in item_gt
-        assert "bboxes" in item_gt
+        assert "teacher_img" not in item_gt
 
         item_pl = ssod_ds[4]
         assert item_pl["is_pseudo"]
         assert item_pl["source"] == 1
 
-        batch = ssod_ds.collate_fn([ssod_ds[0], ssod_ds[4]])
-        assert batch["img"].shape[0] == 2
-        assert isinstance(batch["is_pseudo"], torch.Tensor)
-        assert batch["is_pseudo"].tolist() == [False, True]
-        assert batch["source"].tolist() == [0, 1]
+        batch = ssod_ds.collate_fn([ssod_ds[0], ssod_ds[4], ssod_ds[5]])
+        assert batch["img"].shape[0] == 3
+        assert batch["is_pseudo"].tolist() == [False, True, True]
+        assert batch["source"].tolist() == [0, 1, 1]
+        # Teacher views of the unlabeled samples only; GT boxes weighted 1
+        assert batch["teacher_img"].shape == (2, 3, 128, 128)
+        assert batch["erase_boxes"].shape == (0, 5)
+        assert batch["pl_weight"].shape == (batch["bboxes"].shape[0],)
+        assert torch.all(batch["pl_weight"] == 1)
+        assert set(batch["batch_idx"].tolist()) == {0.0}
 
-    def test_dynamic_dataframe_reloading(self, dirs):
-        pl_ds = PseudoYOLODataset(images_dir=dirs.pl_img, labels_dir=dirs.pl_lbl, filter_empty=True)
-        assert len(pl_ds) == 2
-
-        # Simulate PseudoLabelGenerator candidate output dataframe for pseudo_2
-        df = pl.DataFrame({
-            "image_stem": ["pseudo_2"],
-            "class_id": [0],
-            "x_center": [0.55],
-            "y_center": [0.65],
-            "w_norm": [0.25],
-            "h_norm": [0.35],
-            "img_width": [128],
-            "img_height": [128],
-        })
-
-        pl_ds.reload(filtered_df=df, filter_empty=True)
-        assert len(pl_ds) == 1
-        assert pl_ds.im_files[0] == str(dirs.pl_img / "pseudo_2.jpg")
+    def test_gt_only_batch_has_no_teacher_views(self, dirs):
+        data = {"names": {0: "waste"}, "nc": 1}
+        gt_ds = YOLODataset(img_path=str(dirs.gt_train_img), imgsz=128, data=data, augment=True)
+        pl_ds = UnlabeledDataset(images_dir=dirs.pl_img, data=data, imgsz=128)
+        ssod_ds = SSODDataset(gt_dataset=gt_ds, pl_dataset=pl_ds, imgsz=128)
+        batch = ssod_ds.collate_fn([ssod_ds[0], ssod_ds[1]])
+        assert batch["teacher_img"] is None
 
     @pytest.mark.integration
     def test_handler_lifecycle_and_mosaic_close(self, dirs):
@@ -316,7 +357,6 @@ class TestSSODDatasetIntegration:
             gt_train_images=dirs.gt_train_img,
             gt_val_images=dirs.gt_val_img,
             pl_images_dir=dirs.pl_img,
-            pl_labels_dir=dirs.pl_lbl,
             imgsz=128,
             batch_size=2,
             workers=0,
@@ -324,8 +364,10 @@ class TestSSODDatasetIntegration:
         )
 
         assert len(handler.gt_train_dataset) == 4
-        assert len(handler.pl_dataset) == 2
+        assert len(handler.pl_dataset) == 0
+        assert handler.set_pl_images(dirs.pl_files[:2]) == 2
         assert len(handler.train_dataset) == 6
+        assert len(handler.sampler) == 6
 
         train_loader = handler.get_train_loader()
         val_loader = handler.get_val_loader()
@@ -352,203 +394,37 @@ class TestSSODDatasetIntegration:
         handler.set_epoch(epoch=total_epochs - 1, total_epochs=total_epochs)
         assert not handler.train_dataset.is_mosaic_closed
 
-        # Iterate 1 batch to verify tensor execution
-        batch = next(iter(train_loader))
-        assert batch["img"].shape == (2, 3, 128, 128)
-        assert len(batch["is_pseudo"]) == 2
+        # Iterate the epoch to verify tensor execution
+        n_pseudo = 0
+        for batch in train_loader:
+            assert batch["img"].shape == (2, 3, 128, 128)
+            n_pseudo += int(batch["is_pseudo"].sum())
+            n_views = 0 if batch["teacher_img"] is None else len(batch["teacher_img"])
+            assert n_views == int(batch["is_pseudo"].sum())
+        assert n_pseudo == 2
 
-    def test_pseudo_dataset_buffer_sync_from_empty(self, dirs, empty_pl_lbl, populate_pl_labels):
-        pl_ds = PseudoYOLODataset(images_dir=dirs.pl_img, labels_dir=empty_pl_lbl, filter_empty=True)
-        assert len(pl_ds) == 0
-        assert len(pl_ds.ims) == 0
-        assert len(pl_ds.npy_files) == 0
-
-        populate_pl_labels(empty_pl_lbl)
-
-        assert pl_ds.reload() == 2
-        assert len(pl_ds) == 2
-        assert len(pl_ds.ims) == 2
-        assert len(pl_ds.npy_files) == 2
-        assert len(pl_ds.im_hw0) == 2
-        assert len(pl_ds.im_hw) == 2
-
-        # Accessing all items must succeed without IndexError
-        assert "img" in pl_ds[0]
-        assert "img" in pl_ds[1]
-
-    def test_pseudo_dataset_dataframe_buffer_sync_from_empty(self, dirs, empty_pl_lbl):
-        pl_ds = PseudoYOLODataset(images_dir=dirs.pl_img, labels_dir=empty_pl_lbl, filter_empty=True)
-        assert len(pl_ds) == 0
-        assert len(pl_ds.ims) == 0
-
-        df = pl.DataFrame({
-            "image_stem": ["pseudo_1", "pseudo_2"],
-            "class_id": [0, 0],
-            "x_center": [0.5, 0.6],
-            "y_center": [0.5, 0.6],
-            "w_norm": [0.2, 0.3],
-            "h_norm": [0.2, 0.3],
-            "img_width": [128, 128],
-            "img_height": [128, 128],
-        })
-        pl_ds.reload(filtered_df=df, filter_empty=True)
-        assert len(pl_ds) == 2
-        assert len(pl_ds.ims) == 2
-        assert len(pl_ds.npy_files) == 2
-
-        assert "img" in pl_ds[1]
+        # The unlabeled-only loader serves the Teacher views of the current images
+        views = next(iter(handler.get_unlabeled_loader()))["teacher_img"]
+        assert views.shape == (2, 3, 128, 128)
 
     @pytest.mark.slow
-    def test_pseudo_dataset_multiprocessing_dataloader_after_reload(
-        self, dirs, empty_pl_lbl, populate_pl_labels
-    ):
-        pl_ds = PseudoYOLODataset(images_dir=dirs.pl_img, labels_dir=empty_pl_lbl, filter_empty=True)
-        assert len(pl_ds) == 0
-
-        populate_pl_labels(empty_pl_lbl)
-        pl_ds.reload()
-
-        loader = DataLoader(
-            pl_ds,
-            batch_size=2,
-            num_workers=2,
-            collate_fn=pl_ds.collate_fn,
-            persistent_workers=False,
-        )
-        batches = list(loader)
-        assert len(batches) == 1
-        assert batches[0]["img"].shape == (2, 3, 640, 640)
-
-    @pytest.mark.slow
-    def test_handler_multiprocessing_dynamic_reload(self, dirs, empty_pl_lbl, populate_pl_labels):
+    def test_handler_multiprocessing_new_images_per_epoch(self, dirs):
         handler = SSODDatasetHandler(
             gt_train_images=dirs.gt_train_img,
             gt_val_images=dirs.gt_val_img,
             pl_images_dir=dirs.pl_img,
-            pl_labels_dir=empty_pl_lbl,
             imgsz=128,
             batch_size=2,
             workers=2,
             close_mosaic_ratio=0.10,
         )
-        # GT=4, PL=0
-        assert len(handler.gt_train_dataset) == 4
-        assert len(handler.pl_dataset) == 0
         assert len(handler.train_dataset) == 4
 
-        # Epoch 1: pseudo labels generated
-        populate_pl_labels(empty_pl_lbl)
-        assert handler.reload_pseudo_labels() == 2
-        assert len(handler.train_dataset) == 6
-
-        all_pseudo_flags: list[bool] = []
-        for batch in handler.get_train_loader():
-            assert batch["img"].shape == (2, 3, 128, 128)
-            all_pseudo_flags.extend(batch["is_pseudo"].tolist())
-
-        assert len(all_pseudo_flags) == 6
-        assert sum(all_pseudo_flags) == 2  # exactly 2 pseudo items
-
-
-class TestPseudoBoxWeights:
-    """Per-box pseudo-label weights must stay aligned with their boxes through augmentation and collation."""
-
-    # Distinct widths (all near the centre, so augmentation never clips them) mapped to distinct weights
-    BOXES = [(0.44, 0.10), (0.56, 0.14), (0.50, 0.18)]  # (x_center, width)
-    WEIGHTS = [0.2, 0.5, 0.9]
-
-    @pytest.fixture
-    def pl_dirs(self, tmp_path, make_image, make_label):
-        img_dir = tmp_path / "pseudo" / "images"
-        lbl_dir = tmp_path / "pseudo" / "labels"
-        for i in range(4):
-            make_image(img_dir / f"pseudo_{i}.jpg", width=256, height=256)
-            make_label(
-                lbl_dir / f"pseudo_{i}.txt",
-                [f"0 {x} 0.5 {w} {w} {wt}" for (x, w), wt in zip(self.BOXES, self.WEIGHTS)],
-            )
-        make_image(img_dir / "pseudo_empty.jpg", width=256, height=256)
-        return SimpleNamespace(img=img_dir, lbl=lbl_dir)
-
-    @pytest.fixture
-    def make_dataset(self, pl_dirs):
-        def _dataset(cfg: SSODAugmentConfig, filter_empty: bool = True) -> PseudoYOLODataset:
-            ds = PseudoYOLODataset(
-                images_dir=pl_dirs.img,
-                labels_dir=pl_dirs.lbl,
-                imgsz=128,
-                hyp=cfg,
-                filter_empty=filter_empty,
-            )
-            ds.transforms = build_pseudo_transforms(ds, imgsz=128, hyp=cfg)
-            return ds
-
-        return _dataset
-
-    def _assert_aligned(self, batch: dict[str, Any]) -> None:
-        n = batch["bboxes"].shape[0]
-        assert batch["cls"].shape == (n, 1)
-        assert batch["pl_weight"].shape == (n,)
-        assert torch.all(batch["cls"] == 0)
-        for image_index in batch["batch_idx"].unique():
-            mask = batch["batch_idx"] == image_index
-            widths = batch["bboxes"][mask][:, 2]
-            weights = batch["pl_weight"][mask]
-            order = torch.argsort(widths)
-            # Width ordering is preserved by scale/translate/flip, so weights must follow it
-            assert torch.all(torch.diff(weights[order]) > 0), (widths, weights)
-            for w in weights.tolist():
-                assert any(abs(w - ref) < 1e-4 for ref in self.WEIGHTS)
-
-    @pytest.mark.parametrize(
-        "cfg",
-        [SSODAugmentConfig(), SSODAugmentConfig(pl_strong=True, erase_p=1.0)],
-        ids=["weak", "strong"],
-    )
-    def test_weights_follow_boxes(self, make_dataset, cfg):
-        ds = make_dataset(cfg)
-        np.random.seed(0)
-        seen_boxes = 0
-        for _ in range(5):
-            loader = DataLoader(ds, batch_size=4, collate_fn=PseudoYOLODataset.collate_fn)
-            for batch in loader:
-                self._assert_aligned(batch)
-                seen_boxes += batch["bboxes"].shape[0]
-        assert seen_boxes > 20, "augmentation must leave boxes to check"
-
-    def test_empty_samples_collate(self, make_dataset):
-        ds = make_dataset(SSODAugmentConfig(), filter_empty=False)
-        assert len(ds) == 5
-        batch = next(iter(DataLoader(ds, batch_size=5, collate_fn=PseudoYOLODataset.collate_fn)))
-        self._assert_aligned(batch)
-        empty = split_pl_weight({"cls": torch.zeros(0, 1)})
-        assert empty["pl_weight"].shape == (0,)
-
-    def test_dataframe_weights_through_ssod_collate(self, make_dataset):
-        ds = make_dataset(SSODAugmentConfig())
-        rows = [
-            {
-                "image_stem": f"pseudo_{i}",
-                "class_id": 0,
-                "x_center": x,
-                "y_center": 0.5,
-                "w_norm": w,
-                "h_norm": w,
-                "img_width": 256,
-                "img_height": 256,
-                "weight": wt,
-            }
-            for i in range(4)
-            for (x, w), wt in zip(self.BOXES, self.WEIGHTS)
-        ]
-        ds.load_from_dataframe(pl.DataFrame(rows))
-        samples = []
-        for i in range(len(ds)):
-            sample = ds[i]
-            sample["is_pseudo"] = True
-            sample["source"] = 1
-            samples.append(sample)
-        batch = SSODDataset.collate_fn(samples)
-        self._assert_aligned(batch)
-        assert batch["bboxes"].shape[0] > 0
-        assert torch.all(batch["is_pseudo"])
+        for files in (dirs.pl_files[:2], dirs.pl_files):
+            handler.set_pl_images(files)
+            all_pseudo_flags: list[bool] = []
+            for batch in handler.get_train_loader(persistent_workers=False):
+                assert batch["img"].shape[1:] == (3, 128, 128)
+                all_pseudo_flags.extend(batch["is_pseudo"].tolist())
+            assert len(all_pseudo_flags) == 4 + len(files)
+            assert sum(all_pseudo_flags) == len(files)

@@ -1,11 +1,11 @@
 from .dataset import (
-    PseudoYOLODataset,
     SSODAugmentConfig,
     SSODDataset,
     SSODDatasetHandler,
     SSODSampler,
+    UnlabeledDataset,
     build_gt_transforms,
-    build_pseudo_transforms,
+    build_unlabeled_transforms,
     build_val_transforms,
 )
 from .mean_teacher import (
@@ -17,17 +17,17 @@ from .mean_teacher import (
     update_teacher_ema,
 )
 from .metrics import evaluate_coco, fix_prediction_ids
-from .pseudo_labeling import PseudoLabelGenerator
+from .pseudo_labeling import OnlinePseudoLabeler, PseudoLabelLog, ScoreHistograms
 from .utilities import get_logger
 
 __all__ = [
-    "PseudoYOLODataset",
     "SSODAugmentConfig",
     "SSODDataset",
     "SSODDatasetHandler",
     "SSODSampler",
+    "UnlabeledDataset",
     "build_gt_transforms",
-    "build_pseudo_transforms",
+    "build_unlabeled_transforms",
     "build_val_transforms",
     "MeanTeacherConfig",
     "MeanTeacherTrainer",
@@ -37,6 +37,8 @@ __all__ = [
     "update_teacher_ema",
     "evaluate_coco",
     "fix_prediction_ids",
-    "PseudoLabelGenerator",
+    "OnlinePseudoLabeler",
+    "PseudoLabelLog",
+    "ScoreHistograms",
     "get_logger",
 ]

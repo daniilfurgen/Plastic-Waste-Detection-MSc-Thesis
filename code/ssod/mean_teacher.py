@@ -5,11 +5,17 @@ Features:
 1. Supervised Warm-up Phase:
    - Trains Teacher on Ground-Truth data only for n-epochs (or loads from --warmup-weights).
    - Initializes Student model from trained Teacher weights (theta_S <- theta_T).
-2. Mean Teacher Training Loop:
-   - Starts each epoch by generating pseudo-labels on unlabeled pool using PseudoLabelGenerator.
-   - Synchronizes SSODDatasetHandler epoch sequencing (GT shuffled with pseudo-labels; optional GT tail) and 10% mosaic closing.
-   - Trains Student with YOLO default detection loss (with optional unsupervised weight lambda_u).
-   - Updates Teacher EMA at every training step.
+2. Mean Teacher Training Loop (online Size-Stratified Ground Thresholding):
+   - After the warm-up, builds the initial normalised score histogram of each COCO size bin
+     from the Teacher's candidates on a uniform sample of the unlabeled pool.
+   - Starts each epoch with a fresh uniform sample of unlabeled images and synchronizes
+     SSODDatasetHandler epoch sequencing (GT shuffled with unlabeled images; optional GT tail)
+     and 10% mosaic closing.
+   - At every step: derives the per-bin thresholds from the histograms, pseudo-labels the
+     batch's unlabeled images with the Teacher (OnlinePseudoLabeler), trains the Student with
+     YOLO default detection loss (with optional unsupervised weight lambda_u), updates the
+     Teacher EMA, then the histogram EMA with the batch's candidate histograms.
+   - Logs the histograms every epoch (histograms.csv, histograms/epoch_<k>.npz).
    - Evaluates Teacher on GT validation split every epoch:
      extracts all Ultralytics default metrics and pycocotools COCO metrics.
    - Selects and saves best.pt checkpoint based on Ultralytics fitness.
@@ -56,7 +62,7 @@ if TYPE_CHECKING:
     from ultralytics.utils import DEFAULT_CFG_DICT, IterableSimpleNamespace
     from ssod.dataset import SSODAugmentConfig, SSODDatasetHandler
     from ssod.metrics import evaluate_coco
-    from ssod.pseudo_labeling import PseudoLabelGenerator
+    from ssod import pseudo_labeling
     from ssod.losses import WeightedDetectionLoss
 
 # Runtime placeholders populated on-demand by _load_heavy_dependencies()
@@ -72,7 +78,7 @@ IterableSimpleNamespace: Any = None
 SSODAugmentConfig: Any = None
 SSODDatasetHandler: Any = None
 evaluate_coco: Any = None
-PseudoLabelGenerator: Any = None
+pseudo_labeling: Any = None
 WeightedDetectionLoss: Any = None
 E2ELoss: Any = None
 
@@ -80,7 +86,7 @@ E2ELoss: Any = None
 def _load_heavy_dependencies() -> None:
     """Lazily load heavy scientific and CV libraries to ensure instantaneous CLI --help."""
     global torch, nn, np, tqdm, YOLO, DetectionModel, DetectionValidator, DEFAULT_CFG_DICT, IterableSimpleNamespace
-    global SSODAugmentConfig, SSODDatasetHandler, evaluate_coco, PseudoLabelGenerator
+    global SSODAugmentConfig, SSODDatasetHandler, evaluate_coco, pseudo_labeling
     global WeightedDetectionLoss, E2ELoss
 
     if torch is not None:
@@ -105,7 +111,7 @@ def _load_heavy_dependencies() -> None:
             SSODDatasetHandler as _SSODDatasetHandler,
         )
         from ssod.metrics import evaluate_coco as _evaluate_coco
-        from ssod.pseudo_labeling import PseudoLabelGenerator as _PseudoLabelGenerator
+        from ssod import pseudo_labeling as _pseudo_labeling
         from ssod.losses import WeightedDetectionLoss as _WeightedDetectionLoss
     except ImportError:
         from dataset import (  # type: ignore[import-not-found,no-redef]
@@ -113,7 +119,7 @@ def _load_heavy_dependencies() -> None:
             SSODDatasetHandler as _SSODDatasetHandler,
         )
         from metrics import evaluate_coco as _evaluate_coco  # type: ignore[import-not-found,no-redef]
-        from pseudo_labeling import PseudoLabelGenerator as _PseudoLabelGenerator  # type: ignore[import-not-found,no-redef]
+        import pseudo_labeling as _pseudo_labeling  # type: ignore[import-not-found,no-redef]
         from losses import WeightedDetectionLoss as _WeightedDetectionLoss  # type: ignore[import-not-found,no-redef]
 
     torch = _torch
@@ -128,7 +134,7 @@ def _load_heavy_dependencies() -> None:
     SSODAugmentConfig = _SSODAugmentConfig
     SSODDatasetHandler = _SSODDatasetHandler
     evaluate_coco = _evaluate_coco
-    PseudoLabelGenerator = _PseudoLabelGenerator
+    pseudo_labeling = _pseudo_labeling
     WeightedDetectionLoss = _WeightedDetectionLoss
     E2ELoss = _E2ELoss
 
@@ -239,9 +245,6 @@ class MeanTeacherConfig:
     pl_images_dir: Path = field(
         default_factory=lambda: Path("data/video_frames/images/all")
     )
-    pl_labels_dir: Path = field(
-        default_factory=lambda: Path("data/video_frames/labels/all")
-    )
     coco_gt_path: Path | None = field(
         default_factory=lambda: Path("data/flow_img/val/annotations.json")
     )
@@ -269,25 +272,19 @@ class MeanTeacherConfig:
     unsupervised_warmup_epochs: int = 0  # linear lambda_u ramp-up; 0 disables
     gt_repeat: int = 1  # times the GT head is repeated per epoch
     pl_strong_aug: bool = False  # strong Student augmentation on pseudo-labeled images
-    # Fresh uniform PL image sample per epoch; None (or negative) = whole pool, 0 = none (GT-only control)
+    # Fresh uniform unlabeled image sample per epoch (also the size of the initial histogram
+    # sample); None (or negative) = whole pool, 0 = none (GT-only control)
     pl_images_per_epoch: int | None = 2400
     pl_soft_weights: bool = True  # threshold-aware per-box PL loss weights
     pl_cls_only: bool = False  # pseudo boxes train classification only (no box/DFL regression)
     pl_size_bins: bool = True  # ground threshold per COCO size bin (False: one for all boxes)
-    pl_input_scale_bins: bool = True  # size bins at the network input scale (False: original pixels)
-    # Epochs between refreshes of the Teacher snapshot that pseudo-labels (1: every epoch). Larger
-    # values make the labels deliberately staler, to test how much label staleness matters.
-    pl_teacher_refresh_epochs: int = 1
     pl_multi_view: bool = True  # Teacher inference on normal + flipped views (False: normal only)
 
     # Pseudo-labeling parameters
-    pseudo_conf: float = 0.001
-    pseudo_iou: float = 0.5
+    pseudo_conf: float = 0.001  # candidate confidence floor (and lower end of the histograms)
+    pseudo_iou: float = 0.5  # NMS IoU for merging the views
     pseudo_fallback_threshold: float = 0.4
-    pseudo_half: bool = True
-    max_pseudo_images: int | None = None
-    save_candidates: bool = False
-    candidates_dir_name: str = "candidates"
+    max_pseudo_images: int | None = None  # cap on the unlabeled pool (first N images)
 
     # Logging and output
     runs_dir: Path = field(default_factory=lambda: Path("runs/mean_teacher"))
@@ -297,7 +294,6 @@ class MeanTeacherConfig:
     def __post_init__(self) -> None:
         self.gt_data_yaml = Path(self.gt_data_yaml).resolve()
         self.pl_images_dir = Path(self.pl_images_dir).resolve()
-        self.pl_labels_dir = Path(self.pl_labels_dir).resolve()
         if self.coco_gt_path is None:
             self.coco_gt_path = discover_coco_gt_path(self.gt_data_yaml)
         elif self.coco_gt_path is not None:
@@ -466,25 +462,24 @@ def configure_student_criterion(model: nn.Module) -> Any:
     return criterion
 
 
-def pl_teacher_due(epoch: int, refresh_epochs: int) -> bool:
-    """Whether the pseudo-labelling Teacher snapshot is refreshed at 0-based `epoch`."""
-    return epoch % max(1, refresh_epochs) == 0
-
-
-def pl_stat_columns(gen_out: Any | None) -> dict[str, float]:
+def initial_candidate_counts(
+    teacher_model: nn.Module,
+    labeler: Any,
+    loader: Any,
+    device: torch.device,
+) -> np.ndarray:
     """
-    Per-epoch pseudo-label statistics for results.csv from a PseudoLabelResult (zeros when no
-    labels were generated).
+    (size bins x score bins) Teacher candidate counts over every image of `loader`, taken on
+    the same weak views as during training; the start of the score-histogram EMA.
     """
-    labeled_images = gen_out.labeled_images if gen_out is not None else 0
-    boxes = len(gen_out.filtered_df) if gen_out is not None else 0
-    bin_stats = gen_out.bin_stats if gen_out is not None else {}
-    columns: dict[str, float] = {"pl_images": float(labeled_images), "pl_boxes": float(boxes)}
-    for sb in ("small", "medium", "large"):
-        columns[f"pl_share/{sb}"] = float(bin_stats.get(sb, {}).get("share", 0.0))
-    for sb in ("small", "medium", "large"):
-        columns[f"pl_weight/{sb}"] = float(bin_stats.get(sb, {}).get("mean_weight", 0.0))
-    return columns
+    counts = None
+    for batch in tqdm(loader, desc="Initial score histograms", leave=False):
+        imgs = batch["teacher_img"].to(device, non_blocking=device.type == "cuda")
+        batch_counts = labeler.count(labeler.candidates(teacher_model, imgs))
+        counts = batch_counts if counts is None else counts + batch_counts
+    if counts is None:
+        return np.zeros((len(pseudo_labeling.SIZE_BINS), labeler.n_bins), dtype=np.int64)
+    return counts
 
 
 def compute_batch_loss(
@@ -755,6 +750,7 @@ class MeanTeacherTrainer:
         training_history: list[dict[str, Any]],
         warmup_weights: Path | str | None = None,
         is_interrupted: bool = False,
+        score_histograms: dict[str, Any] | None = None,
     ) -> None:
         """Atomically serialize full SSOD training state dictionary to disk."""
         _load_heavy_dependencies()
@@ -797,6 +793,7 @@ class MeanTeacherTrainer:
             else None,
             "rng_state": rng_state,
             "is_interrupted": is_interrupted,
+            "score_histograms": deepcopy(score_histograms),
         }
 
         torch.save(checkpoint, tmp_dest)
@@ -885,13 +882,13 @@ class MeanTeacherTrainer:
                             setattr(self.config, k, Path(v).resolve() if v else None)
                         elif k == "model_name" and v:
                             setattr(self.config, k, str(v))
-                        elif k in ("gt_data_yaml", "pl_images_dir", "pl_labels_dir") and v:
+                        elif k in ("gt_data_yaml", "pl_images_dir") and v:
                             setattr(self.config, k, Path(v).resolve())
                         elif k in ("unsupervised_weight", "ema_decay", "tail_ratio", "close_mosaic_ratio", "lr0", "lrf", "pseudo_fallback_threshold"):
                             setattr(self.config, k, float(v))
-                        elif k in ("ssl_epochs", "warmup_epochs", "batch_size", "imgsz", "workers", "unsupervised_warmup_epochs", "gt_repeat", "seed", "pl_teacher_refresh_epochs"):
+                        elif k in ("ssl_epochs", "warmup_epochs", "batch_size", "imgsz", "workers", "unsupervised_warmup_epochs", "gt_repeat", "seed"):
                             setattr(self.config, k, int(v))
-                        elif k in ("pl_strong_aug", "pl_soft_weights", "pl_cls_only", "pl_size_bins", "pl_multi_view", "pl_input_scale_bins"):
+                        elif k in ("pl_strong_aug", "pl_soft_weights", "pl_cls_only", "pl_size_bins", "pl_multi_view"):
                             setattr(self.config, k, bool(v))
                         elif k == "pl_images_per_epoch":
                             setattr(self.config, k, int(v) if v is not None else None)
@@ -957,6 +954,7 @@ class MeanTeacherTrainer:
                 "training_history": training_history,
                 "warmup_weights": raw_ckpt.get("warmup_weights"),
                 "rng_state": raw_ckpt.get("rng_state"),
+                "score_histograms": raw_ckpt.get("score_histograms"),
                 "results_csv": results_csv,
             }
 
@@ -1046,6 +1044,7 @@ class MeanTeacherTrainer:
             "training_history": training_history,
             "warmup_weights": str(warmup_weights) if warmup_weights else None,
             "rng_state": None,
+            "score_histograms": None,
             "results_csv": results_csv,
         }
 
@@ -1200,24 +1199,8 @@ class MeanTeacherTrainer:
 
         teacher.save(str(last_path))
 
-        # 2. Initialize SSODDatasetHandler and PseudoLabelGenerator
-        pseudo_generator = PseudoLabelGenerator(
-            teacher_model=YOLO(str(last_path)),
-            batch_size=self.config.batch_size * 2,
-            half=self.config.pseudo_half and self.device.type == "cuda",
-            workers=self.config.workers,
-            conf=self.config.pseudo_conf,
-            iou_threshold=self.config.pseudo_iou,
-            fallback_threshold=self.config.pseudo_fallback_threshold,
-            soft_weights=self.config.pl_soft_weights,
-            size_bins=self.config.pl_size_bins,
-            multi_view=self.config.pl_multi_view,
-            imgsz=self.config.imgsz,
-            input_scale_bins=self.config.pl_input_scale_bins,
-            device=self.device,
-            logger=self.logger,
-        )
-
+        # 2. Initialize SSODDatasetHandler, online pseudo-labeler and score histograms
+        use_pseudo_labels = self.config.pl_images_per_epoch != 0
         augment_cfg = SSODAugmentConfig(
             tail_ratio=self.config.tail_ratio,
             close_mosaic_ratio=self.config.close_mosaic_ratio,
@@ -1227,7 +1210,6 @@ class MeanTeacherTrainer:
         dataset_handler = SSODDatasetHandler(
             gt_data_yaml=self.config.gt_data_yaml,
             pl_images_dir=self.config.pl_images_dir,
-            pl_labels_dir=self.config.pl_labels_dir,
             imgsz=self.config.imgsz,
             batch_size=self.config.batch_size,
             workers=self.config.workers,
@@ -1238,6 +1220,58 @@ class MeanTeacherTrainer:
             gt_repeat=self.config.gt_repeat,
             logger=self.logger,
         )
+
+        labeler = pseudo_labeling.OnlinePseudoLabeler(
+            conf=self.config.pseudo_conf,
+            iou_threshold=self.config.pseudo_iou,
+            multi_view=self.config.pl_multi_view,
+            soft_weights=self.config.pl_soft_weights,
+            erase_drop_ratio=augment_cfg.erase_drop_ratio,
+        )
+        histograms = pseudo_labeling.ScoreHistograms(
+            conf_floor=self.config.pseudo_conf,
+            fallback=self.config.pseudo_fallback_threshold,
+            size_bins=self.config.pl_size_bins,
+            n_bins=labeler.n_bins,
+        )
+        pl_pool: list[Path] = []
+        if use_pseudo_labels:
+            pl_pool = pseudo_labeling.list_images(self.config.pl_images_dir)
+            if self.config.max_pseudo_images is not None and self.config.max_pseudo_images > 0:
+                pl_pool = pl_pool[: self.config.max_pseudo_images]
+            self.logger.info(f"Unlabeled pool: {len(pl_pool)} images in {self.config.pl_images_dir}.")
+
+        def build_initial_histograms() -> None:
+            """Start the histograms from the Teacher's candidates on a uniform pool sample."""
+            dataset_handler.set_pl_images(
+                pseudo_labeling.sample_image_files(
+                    pl_pool, self.config.pl_images_per_epoch, self.config.seed
+                )
+            )
+            counts = initial_candidate_counts(
+                teacher.model, labeler, dataset_handler.get_unlabeled_loader(), self.device
+            )
+            histograms.reset(counts)
+            pseudo_labeling.append_histograms(self.exp_dir, 0, histograms, counts)
+            self.logger.info(
+                f"Initial score histograms from {len(dataset_handler.pl_dataset)} images "
+                f"({int(counts.sum())} candidates): "
+                + ", ".join(
+                    f"{b}: threshold={t.threshold:.3f}, object mode={t.object_mode:.3f}"
+                    + ("" if t.from_valley else " (fallback)")
+                    for b, t in histograms.thresholds().items()
+                )
+            )
+
+        if use_pseudo_labels:
+            saved_histograms = ckpt_data.get("score_histograms") if ckpt_data is not None else None
+            if saved_histograms is not None:
+                histograms.load_state_dict(saved_histograms)
+                pseudo_labeling.truncate_histogram_log(self.exp_dir, start_epoch)
+                self.logger.info("Restored score histograms from checkpoint.")
+            else:
+                pseudo_labeling.truncate_histogram_log(self.exp_dir, -1)
+                build_initial_histograms()
 
         # 3. Setup Optimizer & Scheduler for Student
         optimizer = torch.optim.AdamW(
@@ -1380,14 +1414,20 @@ class MeanTeacherTrainer:
                 f"Epoch 0 Baseline: Teacher mAP50={baseline_metrics.get('metrics/mAP50(B)', 0.0):.4f}, "
                 f"mAP50-95={baseline_metrics.get('metrics/mAP50-95(B)', 0.0):.4f}"
             )
+            # Pseudo-label columns hold the initial thresholds (no pseudo-labels trained yet)
+            baseline_log = pseudo_labeling.PseudoLabelLog()
+            if use_pseudo_labels:
+                baseline_log.thresholds.append(
+                    np.array([t.threshold for t in histograms.thresholds().values()])
+                )
+                baseline_log.object_modes.append(
+                    np.array([t.object_mode for t in histograms.thresholds().values()])
+                )
             baseline_record = {
                 "epoch": 0,
                 "train_loss": 0.0,
                 "epoch_time": 0.0,
-                "threshold/small": 0.0,
-                "threshold/medium": 0.0,
-                "threshold/large": 0.0,
-                **pl_stat_columns(None),
+                **baseline_log.columns(),
                 **baseline_metrics,
             }
             training_history.append(baseline_record)
@@ -1406,6 +1446,7 @@ class MeanTeacherTrainer:
                 clean_optimizer_sd = deepcopy(optimizer.state_dict())
                 clean_scheduler_sd = deepcopy(scheduler.state_dict())
                 clean_scaler_sd = deepcopy(scaler.state_dict()) if use_scaler else None
+                clean_histograms = histograms.state_dict() if use_pseudo_labels else None
                 clean_rng = {
                     "torch": torch.get_rng_state(),
                     "cuda": torch.cuda.get_rng_state_all()
@@ -1418,46 +1459,18 @@ class MeanTeacherTrainer:
                 epoch_start_time = time.time()
                 self.logger.info(f"--- Epoch {epoch + 1}/{total_epochs} ---")
 
-                # A. Snapshot teacher weights and isolate for pseudo-label generation
-                if self.config.pl_images_per_epoch == 0:
-                    # Supervised fine-tuning control: same loop, Teacher EMA and schedule, no pseudo-labels
-                    import polars as pl
-
-                    self.logger.info("Pseudo-labeling disabled (pl_images_per_epoch=0): GT-only epoch.")
-                    gen_out = None
-                    dataset_handler.reload_pseudo_labels(filtered_df=pl.DataFrame())
+                # A. Fresh uniform sample of unlabeled images (pseudo-labelled online, per step)
+                if use_pseudo_labels:
+                    dataset_handler.set_pl_images(
+                        pseudo_labeling.sample_image_files(
+                            pl_pool, self.config.pl_images_per_epoch, self.config.seed + epoch + 1
+                        )
+                    )
                 else:
-                    teacher.save(str(last_path))
-                    pl_teacher_path = self.weights_dir / "pl_teacher.pt"
-                    if (
-                        pl_teacher_due(epoch, self.config.pl_teacher_refresh_epochs)
-                        or not pl_teacher_path.is_file()
-                    ):
-                        teacher.save(str(pl_teacher_path))
-                        self.logger.info("Refreshed the pseudo-labelling Teacher snapshot.")
-                    inference_teacher = YOLO(str(pl_teacher_path))
-                    pseudo_generator.model = inference_teacher
-                    if hasattr(pseudo_generator.model, "predictor"):
-                        pseudo_generator.model.predictor = None
-
-                    candidates_path = None
-                    if self.config.save_candidates:
-                        cand_dir = self.exp_dir / self.config.candidates_dir_name
-                        cand_dir.mkdir(parents=True, exist_ok=True)
-                        candidates_path = cand_dir / f"candidates_epoch_{epoch + 1}.parquet"
-
-                    self.logger.info(
-                        f"Generating pseudo-labels with Teacher (conf={self.config.pseudo_conf})..."
-                    )
-                    gen_out = pseudo_generator.generate(
-                        images_dir=self.config.pl_images_dir,
-                        labels_dir=self.config.pl_labels_dir,
-                        max_images=self.config.max_pseudo_images,
-                        save_candidates_path=candidates_path,
-                        sample_images=self.config.pl_images_per_epoch,
-                        sample_seed=self.config.seed + epoch,
-                    )
-                    dataset_handler.reload_pseudo_labels(filtered_df=gen_out.filtered_df)
+                    # Supervised fine-tuning control: same loop, Teacher EMA and schedule, no pseudo-labels
+                    self.logger.info("Pseudo-labeling disabled (pl_images_per_epoch=0): GT-only epoch.")
+                    dataset_handler.set_pl_images([])
+                pl_log = pseudo_labeling.PseudoLabelLog()
 
                 # B. Configure epoch (GT/PL sequencing, 10% mosaic closing)
                 train_loader = dataset_handler.get_train_loader(persistent_workers=True)
@@ -1493,6 +1506,11 @@ class MeanTeacherTrainer:
                                 )
                         batch["img"] = batch["img"].float() / 255.0
 
+                        # Teacher pseudo-labels from the current per-bin thresholds
+                        if use_pseudo_labels:
+                            thresholds = histograms.thresholds()
+                            step_labels = labeler.label(teacher.model, batch, thresholds)
+
                         optimizer.zero_grad()
 
                         with torch.amp.autocast(
@@ -1523,8 +1541,11 @@ class MeanTeacherTrainer:
                             )
                             optimizer.step()
 
-                        # D. Update Teacher EMA at EVERY STEP
+                        # D. Update Teacher EMA at EVERY STEP, then the score-histogram EMA
                         ema.update()
+                        if use_pseudo_labels:
+                            histograms.update(step_labels.counts, decay=self.config.ema_decay)
+                            pl_log.add(step_labels, thresholds)
 
                         train_losses.append(loss.item())
                         pbar.set_postfix({"loss": f"{loss.item():.4f}"})
@@ -1564,21 +1585,27 @@ class MeanTeacherTrainer:
                     f"Teacher mAP50={map50:.4f}, mAP50-95={map50_95:.4f}, Fitness={fitness:.4f}"
                 )
 
-                # Record epoch log with confidence thresholds
-                thresholds = gen_out.thresholds if gen_out is not None else {}
+                # Record epoch log with pseudo-label statistics and mean thresholds
                 record = {
                     "epoch": epoch + 1,
                     "train_loss": mean_train_loss,
                     "epoch_time": epoch_time,
-                    "threshold/small": float(thresholds.get("small", 0.0)),
-                    "threshold/medium": float(thresholds.get("medium", 0.0)),
-                    "threshold/large": float(thresholds.get("large", 0.0)),
-                    **pl_stat_columns(gen_out),
+                    **pl_log.columns(),
                     **val_metrics,
                 }
                 training_history.append(record)
 
                 append_result(record)
+                if use_pseudo_labels:
+                    pl_log.save(self.exp_dir, epoch + 1, histograms)
+                    self.logger.info(
+                        f"Pseudo-labels: {record['pl_boxes']:.0f} boxes on {record['pl_images']:.0f} images; "
+                        + ", ".join(
+                            f"{b}: threshold={record[f'threshold/{b}']:.3f}, share={record[f'pl_share/{b}']:.3f}, "
+                            f"mean weight={record[f'pl_weight/{b}']:.3f}"
+                            for b in pseudo_labeling.SIZE_BINS
+                        )
+                    )
 
                 # Checkpoint management
                 if fitness > best_fitness:
@@ -1603,6 +1630,7 @@ class MeanTeacherTrainer:
                     training_history=training_history,
                     warmup_weights=ckpt_path,
                     is_interrupted=False,
+                    score_histograms=histograms.state_dict() if use_pseudo_labels else None,
                 )
 
         except KeyboardInterrupt:
@@ -1632,6 +1660,7 @@ class MeanTeacherTrainer:
                 "warmup_weights": str(ckpt_path),
                 "rng_state": clean_rng,
                 "is_interrupted": True,
+                "score_histograms": clean_histograms,
             }
             torch.save(paused_checkpoint, tmp_paused)
             tmp_paused.replace(paused_path)
@@ -1692,11 +1721,6 @@ def main(
         "--pl-images",
         help="Path to unlabeled images dir.",
     ),
-    pl_labels: Path = typer.Option(
-        Path("data/video_frames/labels/all"),
-        "--pl-labels",
-        help="Path to pseudo-labels dir.",
-    ),
     coco_gt: Optional[Path] = typer.Option(
         None, "--coco-gt", help="Path to reference COCO annotations JSON."
     ),
@@ -1751,7 +1775,8 @@ def main(
         2400,
         "--pl-images-per-epoch",
         help=(
-            "Pseudo-label a fresh uniform random sample of this many unlabeled images each epoch "
+            "Train on a fresh uniform random sample of this many unlabeled images each epoch, "
+            "pseudo-labelled online; the initial score histograms use a sample of the same size "
             "(0 disables pseudo-labels: supervised fine-tuning control; -1 uses the whole pool)."
         ),
         min=-1,
@@ -1776,29 +1801,13 @@ def main(
         "--pl-multi-view/--no-pl-multi-view",
         help="Teacher pseudo-labels from the normal and flipped views (off: normal view only).",
     ),
-    pl_input_scale_bins: bool = typer.Option(
-        True,
-        "--pl-input-scale-bins/--no-pl-input-scale-bins",
-        help="Take pseudo-label COCO size bins at the network input scale (off: original image pixels).",
-    ),
-    pl_teacher_refresh_epochs: int = typer.Option(
-        1,
-        "--pl-teacher-refresh-epochs",
-        min=1,
-        help="Epochs between refreshes of the Teacher snapshot used for pseudo-labeling (1: every epoch).",
-    ),
     max_pseudo_images: Optional[int] = typer.Option(
-        None, "--max-pseudo-images", help="Max unlabeled images for pseudo-labeling."
+        None, "--max-pseudo-images", help="Cap on the unlabeled pool (its first N images)."
     ),
     pseudo_fallback_threshold: float = typer.Option(
         0.4,
         "--pseudo-fallback-threshold",
         help="Pseudo-label score threshold for a size bin whose score histogram has no valley.",
-    ),
-    save_candidates: bool = typer.Option(
-        False,
-        "--save-candidates",
-        help="Save raw multi-view pseudo-label candidate detections to Parquet files per epoch.",
     ),
     project: Optional[Path] = typer.Option(
         None,
@@ -1867,7 +1876,6 @@ def main(
     chosen_warmup_weights = pick_val("warmup_weights", warmup_weights, "warmup_weights", None)
     chosen_gt_yaml = pick_val("gt_yaml", gt_yaml, "gt_data_yaml", Path("data/flow_img.yaml"))
     chosen_pl_images = pick_val("pl_images", pl_images, "pl_images_dir", Path("data/video_frames/images/all"))
-    chosen_pl_labels = pick_val("pl_labels", pl_labels, "pl_labels_dir", Path("data/video_frames/labels/all"))
     chosen_coco_gt = pick_val("coco_gt", coco_gt, "coco_gt_path", None)
     chosen_warmup_epochs = int(pick_val("warmup_epochs", warmup_epochs, "warmup_epochs", 10))
     chosen_ssl_epochs = int(pick_val("ssl_epochs", ssl_epochs, "ssl_epochs", 50))
@@ -1897,22 +1905,11 @@ def main(
     chosen_pl_soft_weights = bool(pick_val("pl_soft_weights", pl_soft_weights, "pl_soft_weights", True))
     chosen_pl_size_bins = bool(pick_val("pl_size_bins", pl_size_bins, "pl_size_bins", True))
     chosen_pl_multi_view = bool(pick_val("pl_multi_view", pl_multi_view, "pl_multi_view", True))
-    # Runs saved before input-scale bins existed binned in original pixels; keep that on resume
-    if saved_cfg and "pl_input_scale_bins" not in saved_cfg and not was_specified("pl_input_scale_bins"):
-        chosen_pl_input_scale_bins = False
-    else:
-        chosen_pl_input_scale_bins = bool(
-            pick_val("pl_input_scale_bins", pl_input_scale_bins, "pl_input_scale_bins", True)
-        )
     chosen_max_pseudo_images = pick_val("max_pseudo_images", max_pseudo_images, "max_pseudo_images", None)
     if chosen_max_pseudo_images is not None:
         chosen_max_pseudo_images = int(chosen_max_pseudo_images)
     chosen_pseudo_fallback_threshold = float(pick_val("pseudo_fallback_threshold", pseudo_fallback_threshold, "pseudo_fallback_threshold", 0.4))
-    chosen_save_candidates = bool(pick_val("save_candidates", save_candidates, "save_candidates", False))
     chosen_seed = int(pick_val("seed", seed, "seed", 42))
-    chosen_pl_teacher_refresh_epochs = int(
-        pick_val("pl_teacher_refresh_epochs", pl_teacher_refresh_epochs, "pl_teacher_refresh_epochs", 1)
-    )
 
     cfg = MeanTeacherConfig(
         model_name=str(chosen_model),
@@ -1920,7 +1917,6 @@ def main(
         resume=resume,
         gt_data_yaml=Path(chosen_gt_yaml),
         pl_images_dir=Path(chosen_pl_images),
-        pl_labels_dir=Path(chosen_pl_labels),
         coco_gt_path=Path(chosen_coco_gt) if chosen_coco_gt else None,
         warmup_epochs=chosen_warmup_epochs,
         ssl_epochs=chosen_ssl_epochs,
@@ -1942,12 +1938,9 @@ def main(
         pl_cls_only=chosen_pl_cls_only,
         pl_size_bins=chosen_pl_size_bins,
         pl_multi_view=chosen_pl_multi_view,
-        pl_input_scale_bins=chosen_pl_input_scale_bins,
         max_pseudo_images=chosen_max_pseudo_images,
         pseudo_fallback_threshold=chosen_pseudo_fallback_threshold,
-        save_candidates=chosen_save_candidates,
         seed=chosen_seed,
-        pl_teacher_refresh_epochs=chosen_pl_teacher_refresh_epochs,
         runs_dir=project,
         experiment_name=name,
     )

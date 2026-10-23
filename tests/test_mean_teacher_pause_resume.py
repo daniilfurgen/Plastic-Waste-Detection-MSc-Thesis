@@ -94,7 +94,6 @@ def test_lr_and_pl_cls_only_options(invoke_cli, tmp_path):
         "--no-pl-size-bins",
         "--no-pl-multi-view",
         "--seed", "7",
-        "--pl-teacher-refresh-epochs", "3",
         "--close-mosaic-ratio", "0",
         "--project", str(tmp_path),
         "--name", "cli",
@@ -107,7 +106,6 @@ def test_lr_and_pl_cls_only_options(invoke_cli, tmp_path):
     assert not cfg.pl_size_bins
     assert not cfg.pl_multi_view
     assert cfg.seed == 7
-    assert cfg.pl_teacher_refresh_epochs == 3
 
 
 class TestMeanTeacherDefaults:
@@ -198,6 +196,7 @@ class TestMeanTeacherCheckpointSerialization:
             best_epoch=2,
             training_history=[{"epoch": 1, "fitness": 0.40}, {"epoch": 2, "fitness": 0.456}],
             warmup_weights="weights/warmup_best.pt",
+            score_histograms={"small": [0.5, 0.5], "medium": [1.0, 0.0], "large": [0.0, 1.0]},
         )
         assert save_path.exists()
 
@@ -209,6 +208,7 @@ class TestMeanTeacherCheckpointSerialization:
         assert len(loaded["training_history"]) == 2
         assert loaded["optimizer_state_dict"] is not None
         assert loaded["scheduler_state_dict"] is not None
+        assert loaded["score_histograms"]["small"] == [0.5, 0.5]
 
         # Verify model parameter fidelity
         orig_sd = student.model.state_dict()
@@ -303,8 +303,8 @@ class TestMeanTeacherKeyboardInterrupt:
         data = tmp_path / "data"
         train_img, train_lbl = data / "train" / "images", data / "train" / "labels"
         val_img, val_lbl = data / "val" / "images", data / "val" / "labels"
-        pl_img, pl_lbl = data / "pl" / "images", data / "pl" / "labels"
-        for d in (train_img, train_lbl, val_img, val_lbl, pl_img, pl_lbl):
+        pl_img = data / "pl" / "images"
+        for d in (train_img, train_lbl, val_img, val_lbl, pl_img):
             d.mkdir(parents=True)
 
         dummy_img = np.zeros((64, 64, 3), dtype=np.uint8)
@@ -314,7 +314,6 @@ class TestMeanTeacherKeyboardInterrupt:
             cv2.imwrite(str(pl_img / f"pl_{i}.jpg"), dummy_img)
             (train_lbl / f"train_{i}.txt").write_text("0 0.5 0.5 0.2 0.2\n")
             (val_lbl / f"val_{i}.txt").write_text("0 0.5 0.5 0.2 0.2\n")
-            (pl_lbl / f"pl_{i}.txt").write_text("")
 
         dummy_yaml = tmp_path / "data.yaml"
         dummy_yaml.write_text(
@@ -326,7 +325,6 @@ class TestMeanTeacherKeyboardInterrupt:
                 model_name=yolo26n_path,
                 gt_data_yaml=dummy_yaml,
                 pl_images_dir=pl_img,
-                pl_labels_dir=pl_lbl,
                 runs_dir=runs_dir,
                 experiment_name="interrupt_exp",
                 ssl_epochs=3,
@@ -348,7 +346,7 @@ class TestMeanTeacherKeyboardInterrupt:
         def interrupt(*args, **kwargs):
             raise KeyboardInterrupt("User pressed Ctrl+C")
 
-        monkeypatch.setattr("ssod.mean_teacher.PseudoLabelGenerator.generate", interrupt)
+        monkeypatch.setattr("ssod.pseudo_labeling.OnlinePseudoLabeler.label", interrupt)
 
         res = interrupt_trainer.train_mean_teacher(warmup_weights=warmup_ckpt)
 
@@ -361,6 +359,10 @@ class TestMeanTeacherKeyboardInterrupt:
         loaded = interrupt_trainer.load_checkpoint(paused_pt)
         assert loaded["start_epoch"] == 0
         assert loaded["format"] == "rich"
+        # The epoch-start (initial) score histograms are paused with the models
+        with open(interrupt_trainer.exp_dir / "histograms.csv", encoding="utf-8") as f:
+            initial = [float(r["ema"]) for r in csv.DictReader(f) if r["size_bin"] == "small"]
+        assert loaded["score_histograms"]["small"] == pytest.approx(initial, abs=1e-7)
 
 
 @pytest.mark.parametrize(

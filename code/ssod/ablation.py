@@ -23,12 +23,12 @@ Batches:
   mechanisms, add-one-in, seeds  see ABLATION.md
   loo-seeds              leave-one-out of every component x seeds 42-44, pipeline warm-up (runs/mean_teacher/ablation-loo-seeds)
   tuned-seeds            final and GT-only control x seeds 42-44 from the tuned YOLO26m (runs/mean_teacher/ablation-tuned-seeds)
-  pl-lag                 final with the pseudo-labelling Teacher refreshed every 3 / 8 epochs x seeds 42-44 (runs/mean_teacher/ablation-pl-lag)
   fractions-loo          leave-one-out + cap 4800 at 10% of the labels x seeds 42-44 (runs/mean_teacher/ablation-fractions-loo)
   ucwd                   UCWD at imgsz 640: supervised warm-up on all labels; SSL vs. control on 25% (runs/mean_teacher/ablation-ucwd)
 
-Batches up to fractions-2400 bin pseudo-labels in original pixels (pinned); later ones use the
-input-scale default.
+All batches now run the online pipeline (per-step pseudo-labels with EMA score histograms). Their
+results so far were produced by the offline per-epoch pipeline at git tag `offline-ssgt`; batches up
+to fractions-2400 then binned pseudo-labels in original pixels, which is no longer available.
 
 Usage:
   uv run python code/ssod/ablation.py                  # batch "settle"
@@ -412,14 +412,6 @@ BATCHES["fractions-2400"] = fraction_batch(
     },
 )
 
-# Every batch above predates input-scale size bins and binned pseudo-labels in original image
-# pixels; pin that so they stay reproducible. Batches added below use the input-scale default.
-LEGACY_SIZE_BINS = ["--no-pl-input-scale-bins"]
-for _batch in BATCHES.values():
-    for _run, _args in _batch.runs.items():
-        _batch.runs[_run] = [*_args, *LEGACY_SIZE_BINS]
-
-# ---- Batches with input-scale size bins ----------------------------------------------------
 
 SEEDS = (42, 43, 44)
 GT_ONLY_2400 = [
@@ -461,16 +453,6 @@ BATCHES["tuned-seeds"] = Batch(
     project=Path("runs/mean_teacher/ablation-tuned-seeds"),
     runs=seeded({"final": FINAL_SSL, "gt-only": GT_ONLY_2400}),
     warmup_weights=TUNED_WARMUP_WEIGHTS,
-)
-
-# Label staleness test: the final configuration with the pseudo-labelling Teacher refreshed only
-# every k epochs (images are still sampled fresh every epoch). If deliberately staler labels do not
-# hurt, refreshing them within an epoch cannot help much. k = 1 is `final` in `loo-seeds`.
-BATCHES["pl-lag"] = Batch(
-    project=Path("runs/mean_teacher/ablation-pl-lag"),
-    runs=seeded({
-        f"lag{k}": [*FINAL_SSL, "--pl-teacher-refresh-epochs", str(k)] for k in (3, 8)
-    }),
 )
 
 # Leave-one-out at 10% of the labels, where SSL helps most, from the existing 10% warm-up. GT is
@@ -712,31 +694,30 @@ def ensure_subset(fraction: float, logger, data_yaml: Path = GT_DATA_YAML) -> Pa
     return yaml_path
 
 
-def rest_pool_paths(fraction: float, data_yaml: Path) -> tuple[Path, Path]:
-    """Images and pseudo-label directories of the train images left out of a GT subset."""
+def rest_pool_path(fraction: float, data_yaml: Path) -> Path:
+    """Images directory of the train images left out of a GT subset."""
     rest = Path(dataset_config(data_yaml.resolve())["path"]) / f"unlabeled_{100 - round(fraction * 100)}pct"
-    return rest / "images", rest / "labels"
+    return rest / "images"
 
 
-def ensure_rest_pool(fraction: float, data_yaml: Path, logger) -> tuple[Path, Path]:
+def ensure_rest_pool(fraction: float, data_yaml: Path, logger) -> Path:
     """
     Unlabeled pool for SSL on a GT subset: symlinks to the train images outside the subset (their
-    GT labels are never read). Pseudo-labels are written to the pool's own labels directory.
+    GT labels are never read).
     """
-    images_dir, labels_dir = rest_pool_paths(fraction, data_yaml)
+    images_dir = rest_pool_path(fraction, data_yaml)
     subset = {p.name for p in subset_images(fraction, data_yaml)}
     rest = [p for p in train_images(data_yaml) if p.name not in subset]
     if images_dir.is_dir() and len(list(images_dir.iterdir())) == len(rest):
-        return images_dir, labels_dir
+        return images_dir
 
     images_dir.mkdir(parents=True, exist_ok=True)
-    labels_dir.mkdir(parents=True, exist_ok=True)
     for image in rest:
         link = images_dir / image.name
         if not link.exists():
             link.symlink_to(image.resolve())
     logger.info(f"Unlabeled pool: {len(rest)} train images outside the {fraction:.0%} subset -> {images_dir}")
-    return images_dir, labels_dir
+    return images_dir
 
 
 def run_subprocess(cmd: list[str], log_path: Path, name: str, logger) -> int:
@@ -810,11 +791,11 @@ def data_args(spec: Batch, warmup: Warmup, dry_run: bool, logger) -> list[str]:
     args = ["--gt-yaml", str(subset_paths(warmup.fraction, warmup.data)[1])]
     if spec.unlabeled_rest and warmup.fraction < 1.0:
         pool = (
-            rest_pool_paths(warmup.fraction, warmup.data)
+            rest_pool_path(warmup.fraction, warmup.data)
             if dry_run
             else ensure_rest_pool(warmup.fraction, warmup.data, logger)
         )
-        args += ["--pl-images", str(pool[0]), "--pl-labels", str(pool[1])]
+        args += ["--pl-images", str(pool)]
     return args
 
 
@@ -841,11 +822,6 @@ def main(
     ),
     only: Optional[list[str]] = typer.Option(
         None, "--only", help="Run only these runs of the batch (repeatable)."
-    ),
-    save_candidates: bool = typer.Option(
-        True,
-        "--save-candidates/--no-save-candidates",
-        help="Keep per-epoch candidate Parquet files for offline analysis.",
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print the commands only."),
 ) -> None:
@@ -909,7 +885,6 @@ def main(
                 "--project", str(project),
                 "--name", run,
                 *run_data_args,
-                *(["--save-candidates"] if save_candidates else []),
                 *spec.runs[run],
             ]
 

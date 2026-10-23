@@ -9,6 +9,41 @@ Long SSL runs (50–100 epochs) kept ending below their own starting point. The 
 model scores 0.430 mAP50-95, and full SSL training slowly degraded it. Degradation is visible within
 ~10 epochs, so short runs are enough to compare settings, and many fit in one night.
 
+## Pipeline change: online SSGT
+
+Every batch below ran with the **offline** pipeline at git tag `offline-ssgt`. At the start of each
+epoch, a frozen Teacher snapshot pseudo-labelled the epoch's frame sample, the per-bin thresholds
+were fitted to that epoch's full candidate set, and the Student trained on those fixed labels for
+the whole epoch.
+
+The trainer now pseudo-labels **online, at every step**, which is how an online Mean Teacher is
+meant to work:
+
+- **Initial histograms.** After the warm-up, the Teacher's candidates on a uniform
+  `--pl-images-per-epoch` sample of the pool give the initial *normalised* score histogram of each
+  size bin.
+- **Weak Teacher view.** At each step, the Teacher labels the batch's unlabeled images from their
+  weak view. That view has the same scale, translate and flip as the Student's view, but no colour
+  jitter or strong augmentation.
+- **Thresholds and weights.** Thresholds and object modes come from the current histograms. Kept
+  boxes get soft weights. When strong augmentation is on, boxes that are at least 50% erased in the
+  Student view are dropped.
+- **Size bins.** A box's bin is set by its area in the 640 px batch image, which is the network
+  input scale with the scale augmentation already applied.
+- **Histogram EMA.** After the Student step and the Teacher EMA, the histograms are updated with the
+  normalised histograms of *all* the batch's candidates, kept or not, using the Teacher's decay:
+  $\hat p'_t = \alpha \hat p'_{t-1} + (1-\alpha)\hat p_t$.
+
+Images where no candidate passes the threshold are trained as background. Before, they were left
+out. The removed settings are:
+- `--pl-labels` (no label files are written any more);
+- `--pl-teacher-refresh-epochs` (the `pl-lag` batch);
+- `--no-pl-input-scale-bins`;
+- `--save-candidates`, replaced by the histogram log described under [Output](#output).
+
+The batch definitions are kept, and re-running them now uses the online pipeline. Their results
+below remain those of `offline-ssgt`.
+
 ## Adopted default configuration
 
 Based on the batches below, the trainer's defaults are now:
@@ -18,12 +53,12 @@ Based on the batches below, the trainer's defaults are now:
 | `--pl-images-per-epoch` | 2400 | The optimum for YOLO26 at full labels: 27k → 4,800 → 2,400 frames kept improving, and 1,200 loses the gain over the GT-only control (`architectures`). With 10–25% of the labels, 4,800 does slightly better (`fractions-2400`); that's left as future work. |
 | `--pl-soft-weights` | on | Part of every best configuration since `pool`. |
 | `--ema-decay` | 0.9996 | Removes most of the late drift; 0.9998 adds nothing. |
-| `--pl-input-scale-bins` | on | Size bins at the network input scale, so they mean the same on any image resolution (needed for UCWD, whose images range from 1200×800 to 5472×3648). Adopted on principle, not from an ablation; all batches below ran with original-pixel bins. |
+| Input-scale size bins | always | Size bins at the network input scale, so they mean the same on any image resolution (needed for UCWD, whose images range from 1200×800 to 5472×3648). Adopted on principle, not from an ablation; the batches up to `fractions-2400` ran with original-pixel bins (`--no-pl-input-scale-bins`, removed with online SSGT). |
 | `--tail-ratio` | 0 | All GT is shuffled with the pseudo-labels; no unmixed GT at the end of each epoch. The 25% GT tail showed no measurable effect in `mechanisms`, `add-one-in`, `loo-seeds` or `fractions-loo`. All batches below ran with the 25% tail. |
 
 Earlier batches pin their original settings explicitly in `ablation.py` (EMA 0.999, hard labels,
-full pool via `--pl-images-per-epoch -1`, original-pixel size bins via `--no-pl-input-scale-bins`,
-the 25% GT tail via `--tail-ratio 0.25`), so they reproduce exactly. Where a batch table below
+full pool via `--pl-images-per-epoch -1`, the 25% GT tail via `--tail-ratio 0.25`). At tag
+`offline-ssgt` (which also pinned original-pixel size bins) they reproduce exactly. Where a batch table below
 describes `final` as including the GT tail, that is the configuration those runs used.
 
 ## How runs are kept comparable
@@ -476,6 +511,9 @@ it. 6 runs, about 2.5 h.
 
 #### `pl-lag`: does label staleness matter?
 
+(Offline pipeline only. The batch was removed from `ablation.py` with online SSGT, which labels
+every step; it can be re-run at tag `offline-ssgt`.)
+
 Pseudo-labels are generated once per epoch, because the size-bin thresholds need the score
 histogram of all candidates, whereas Unbiased Teacher and similar methods label every step with the
 current Teacher. So labels go stale within an epoch. An offline check on the saved candidates
@@ -703,7 +741,7 @@ supervised starting point.
 
 | Flag | Meaning |
 |---|---|
-| `--pl-images-per-epoch N` | Pseudo-label a fresh random sample of N unlabeled frames each epoch (default 2,400) instead of all ~27k. Sampling whole images keeps the small/medium/large box mix unchanged. `0` disables pseudo-labels (GT-only control); `-1` uses the whole pool. |
+| `--pl-images-per-epoch N` | Train on a fresh random sample of N unlabeled frames each epoch (default 2,400) instead of all ~27k; the initial score histograms use a sample of the same size. Sampling whole images keeps the small/medium/large box mix unchanged. `0` disables pseudo-labels (GT-only control); `-1` uses the whole pool. |
 | `--gt-repeat k` | Repeat the GT part of each epoch (except the GT tail, if any) k times. |
 | `--gt-yaml` | Ground-truth dataset YAML (used for the label-fraction subsets). |
 | `--model` | Architecture name recorded with the run; the weights themselves come from `--warmup-weights`. |
@@ -713,9 +751,9 @@ supervised starting point.
 | `--tail-ratio r` | Fraction of GT placed, unmixed, at the end of each epoch (default 0: all GT mixed with the pseudo-labels; every batch in this file ran with 0.25 unless it sets 0, pinned via `LEGACY_GT_TAIL`). |
 | `--pl-strong-aug` | Stronger colour jitter, blur and random erasing on pseudo-labelled images only. |
 | `--unsupervised-weight λ` | Multiply the pseudo-label loss by λ. |
-| `--no-pl-input-scale-bins` | Take pseudo-label size bins in original image pixels instead of at the network input scale. Every batch in this file runs with it (pinned via `LEGACY_SIZE_BINS`), since they predate input-scale bins. On FloW-img (1280 px wide, `imgsz` 640) this shifts the bin limits by 2× per side, so earlier results remain internally consistent. |
+| `--no-pl-input-scale-bins` (removed) | At `offline-ssgt`: take pseudo-label size bins in original image pixels instead of at the network input scale. The batches up to `fractions-2400` ran with it (pinned via `LEGACY_SIZE_BINS`). On FloW-img (1280 px wide, `imgsz` 640) this shifts the bin limits by 2× per side, so those results remain internally consistent. |
 | `--pl-cls-only` | Pseudo-boxes contribute to the classification loss only, with no box regression. Ground-truth boxes are unaffected. |
-| `--pl-teacher-refresh-epochs k` | Refresh the Teacher snapshot that pseudo-labels only every k epochs (default 1); images are still sampled every epoch. |
+| `--pl-teacher-refresh-epochs k` (removed) | At `offline-ssgt`: refresh the Teacher snapshot that pseudo-labels only every k epochs (default 1); images are still sampled every epoch. |
 | `--seed n` | Seed for the per-epoch pseudo-label sample, epoch ordering and augmentation (default 42). |
 | `--lr0`, `--ema-decay` | Student learning rate and Teacher EMA decay (default 0.9996). |
 | `--close-mosaic-ratio r` | Fraction of final epochs with GT Mosaic off (default 0.1; 0 keeps it on throughout). |
@@ -735,10 +773,21 @@ Each batch directory contains one folder per run and two shared files:
 
 Each run folder holds:
 
-- `results.csv`: per-epoch metrics, pseudo-label counts, size-bin shares and mean weights;
+- `results.csv`: per-epoch metrics, pseudo-label counts, size-bin shares and mean weights, and
+  the epoch mean of the per-step thresholds (`threshold/*`) and object modes (`object_mode/*`).
+  Epoch 0 holds the initial thresholds;
+- `histograms.csv`: one row per epoch, histogram (size bin, or `all` without size bins) and score
+  bin (21 bins over [0.001, 1]). `ema` is the histogram EMA at the end of the epoch, and `counts`
+  is the raw candidate count summed over the epoch's steps. Epoch 0 is the initial histogram and
+  its counts;
+- `histograms/epoch_<k>.npz`: per-step arrays `counts` (steps × size bins × score bins), `kept`
+  (steps × size bins), `thresholds` and `object_modes` (steps × size bins). Starting from the epoch-0
+  `ema`, applying `ScoreHistograms.update` to each step's `counts` reproduces the EMA and thresholds
+  at every step;
 - `train.log` and `stdout.log`;
-- `weights/best.pt`;
-- `candidates/`: raw per-epoch Teacher detections as Parquet, for offline analysis.
+- `weights/best.pt`.
+
+At `offline-ssgt`, runs also had `candidates/`, the raw per-epoch Teacher detections as Parquet.
 
 Compare runs on val metrics only. Train loss isn't comparable across settings that change the loss
 (e.g. `cls-only` drops the pseudo-box regression terms).

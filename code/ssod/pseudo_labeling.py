@@ -1,45 +1,37 @@
 """
-Pseudo-label generation for the Mean Teacher pipeline.
+Online pseudo-labelling for the Mean Teacher pipeline (Size-Stratified Ground Thresholding).
 
-For a set of unlabeled images the Teacher model produces candidate boxes with a very low confidence
-floor, and the confident ones are kept as pseudo-labels:
+At every training step the Teacher labels the unlabeled images of the batch:
 
-1. Multi-view inference: the Teacher predicts on each image and on its horizontal flip; flipped
+1. Multi-view inference: the Teacher predicts on the weak view of each image (same geometry as
+   the Student's view, without photometric augmentation) and on its horizontal flip; flipped
    boxes are mapped back and both views are merged with class-wise NMS.
-2. Size-stratified ground thresholding: candidates are split into COCO size bins (box areas taken
-   at the network input scale), and each bin gets its own score threshold at the valley between
-   the noise and object modes of its score histogram.
+2. Size-stratified ground thresholding: candidates are split into COCO size bins by their area
+   in the batch image (the network input scale). Each bin keeps an EMA of its normalised score
+   histogram, and its threshold is the valley between the noise and object modes of it.
 3. Soft weights: each kept box is weighted by how far its score lies between its bin's threshold
    (weight 0) and object mode (weight 1).
 
-Pseudo-labels are written as YOLO label files, with the weight as an optional 6th column.
+The histograms start from the candidates of a uniform image sample after the warm-up and are
+updated after every step with the normalised histograms of all the batch's candidates, kept or
+not: p'_t = decay * p'_{t-1} + (1 - decay) * p_t.
 """
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+import csv
 from dataclasses import dataclass, field
-import logging
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Sequence
 
-import cv2
 import numpy as np
-import polars as pl
 import torch
 from torchvision.ops import batched_nms  # type: ignore[import-untyped]
-from tqdm import tqdm  # type: ignore[import-untyped]
-import typer
-from ultralytics import YOLO
-
-try:
-    from ssod.utilities import get_logger, input_scale
-except ImportError:
-    from utilities import get_logger, input_scale  # type: ignore[import-not-found,no-redef]
+from ultralytics.utils.nms import non_max_suppression
 
 
 # ---------------------------------------------------------------------------------------------
-# Constants and schemas
+# Constants
 # ---------------------------------------------------------------------------------------------
 
 # COCO object size bins by box area in px² (set on images whose longer side is about 640 px)
@@ -48,35 +40,15 @@ SIZE_BINS: dict[str, tuple[float, float]] = {
     "medium": (32.0**2, 96.0**2),
     "large": (96.0**2, float("inf")),
 }
-
-# One row per candidate box; also the schema of the saved candidate Parquet files
-CANDIDATE_SCHEMA: dict[str, Any] = {
-    "image_stem": pl.String,
-    "label_path": pl.String,
-    "img_width": pl.Int32,
-    "img_height": pl.Int32,
-    "class_id": pl.Int32,
-    "score": pl.Float32,
-    "x1": pl.Float32,
-    "y1": pl.Float32,
-    "x2": pl.Float32,
-    "y2": pl.Float32,
-    "w": pl.Float32,
-    "h": pl.Float32,
-    "size_bin": pl.String,
-}
+SHARED_HISTOGRAM = "all"  # name of the single histogram used when size bins are off
+N_SCORE_BINS = 21
+VIEW_NMS_IOU = 0.7  # Ultralytics' default NMS IoU within one view (models without an E2E head)
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
-app = typer.Typer(
-    name="pseudo-label-generator",
-    help="Generate pseudo-labels via multi-view inference and COCO size-bin ground thresholding.",
-    add_completion=False,
-)
-
 
 # ---------------------------------------------------------------------------------------------
-# Input scale and size bins
+# Size bins
 # ---------------------------------------------------------------------------------------------
 
 
@@ -87,13 +59,12 @@ def assign_size_bins(areas: np.ndarray) -> np.ndarray:
     return names[np.searchsorted(upper_limits, areas, side="right")]
 
 
-def assign_size_bin(w: float, h: float, scale: float = 1.0) -> str:
-    """
-    COCO size bin of a box. COCO's bin limits were set on images whose longer side is about 640 px,
-    so `scale` maps the box to the network input (see `input_scale`) before binning; with
-    scale=1 the bin is taken in original image pixels.
-    """
-    return str(assign_size_bins(np.array([w * h * scale**2]))[0])
+def size_bin_index(areas: torch.Tensor) -> torch.Tensor:
+    """Index into SIZE_BINS of each box area (px²)."""
+    upper_limits = torch.tensor(
+        [hi for _, hi in SIZE_BINS.values()][:-1], dtype=areas.dtype, device=areas.device
+    )
+    return torch.bucketize(areas, upper_limits, right=True)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -110,15 +81,28 @@ class BinThreshold:
     from_valley: bool  # False: no valley was found and the fallback threshold is used
 
 
+def bin_centres(n_bins: int, lo: float = 0.0, hi: float = 1.0) -> np.ndarray:
+    edges = np.linspace(lo, hi, n_bins + 1)
+    return (edges[:-1] + edges[1:]) / 2.0
+
+
+def score_histogram(
+    scores: Sequence[float] | np.ndarray, lo: float = 0.0, n_bins: int = N_SCORE_BINS
+) -> np.ndarray:
+    """Candidate counts in `n_bins` equal score bins over [lo, 1]."""
+    counts, _ = np.histogram(scores, bins=n_bins, range=(lo, 1.0))
+    return counts
+
+
 def ground_modes(
-    scores: Sequence[float] | np.ndarray,
+    hist: np.ndarray,
     lo: float = 0.0,
     hi: float = 1.0,
-    n_bins: int = 21,
     smooth: int = 3,
 ) -> tuple[float, float] | None:
     """
-    Locate the valley between the low-score (noise) mode and the high-score (object) mode.
+    Locate the valley between the low-score (noise) mode and the high-score (object) mode of a
+    score histogram (counts or a normalised density) spanning [lo, hi].
 
     The histogram must span the whole candidate score range: the noise mode sits near the
     candidate confidence floor, so clipping the range (e.g. to [0.5, 1.0]) removes the valley.
@@ -126,11 +110,10 @@ def ground_modes(
     and the centres of the lowest bin between them (valley) and of the upper mode are returned.
     Returns None when there is no valley (fewer than two modes, or a flat valley).
     """
-    hist, bin_edges = np.histogram(scores, bins=n_bins, range=(lo, hi))
-    if hist.sum() == 0:
+    counts = np.asarray(hist, dtype=np.float64)
+    if counts.sum() <= 0:
         return None
 
-    counts = hist.astype(np.float64)
     if smooth > 1:
         padded = np.pad(counts, smooth // 2, mode="edge")
         counts = np.convolve(padded, np.ones(smooth) / smooth, mode="valid")
@@ -148,50 +131,103 @@ def ground_modes(
     if counts[valley_index] >= min(counts[first], counts[second]):
         return None
 
-    centres = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+    centres = bin_centres(len(counts), lo, hi)
     return float(centres[valley_index]), float(centres[second])
 
 
-def ground_threshold(
-    scores: Sequence[float] | np.ndarray,
-    lo: float = 0.0,
-    hi: float = 1.0,
-    n_bins: int = 21,
-    smooth: int = 3,
-) -> float | None:
-    """Valley between the noise and object modes (see `ground_modes`), or None if there is none."""
-    modes = ground_modes(scores, lo=lo, hi=hi, n_bins=n_bins, smooth=smooth)
-    return None if modes is None else modes[0]
-
-
-def fit_bin_threshold(scores: np.ndarray, conf_floor: float, fallback: float) -> BinThreshold:
+def fit_bin_threshold(hist: np.ndarray, conf_floor: float, fallback: float) -> BinThreshold:
     """
-    Ground threshold of one size bin. Without a valley the fixed `fallback` threshold is used and
-    the object mode is approximated by the 90th percentile of the scores above it.
+    Ground threshold of one size bin from its score histogram over [conf_floor, 1]. Without a
+    valley the fixed `fallback` threshold is used and the object mode is approximated by the
+    90th percentile of the histogram mass above it.
     """
-    modes = ground_modes(scores, lo=conf_floor)
+    modes = ground_modes(hist, lo=conf_floor)
     if modes is not None:
         return BinThreshold(threshold=modes[0], object_mode=modes[1], from_valley=True)
 
-    above = scores[scores >= fallback]
-    object_mode = float(np.percentile(above, 90)) if len(above) else 1.0
+    centres = bin_centres(len(hist), conf_floor)
+    above = np.where(centres >= fallback, np.asarray(hist, dtype=np.float64), 0.0)
+    if above.sum() <= 0:
+        return BinThreshold(threshold=fallback, object_mode=1.0, from_valley=False)
+    cdf = np.cumsum(above) / above.sum()
+    object_mode = float(centres[np.searchsorted(cdf, 0.9)])
     return BinThreshold(threshold=fallback, object_mode=object_mode, from_valley=False)
 
 
-def box_weights(
-    scores: np.ndarray,
-    threshold: float,
-    object_mode: float,
-) -> np.ndarray:
+def box_weights(scores: torch.Tensor, threshold: torch.Tensor, object_mode: torch.Tensor) -> torch.Tensor:
     """
     Threshold-aware pseudo-box weights: 0 at the size bin's threshold, rising linearly to 1
     at the bin's object mode, 1 above it. Normalising by the valley-to-mode gap keeps the
     weights independent of where the threshold sits and of how confident the Teacher is.
+    `threshold` and `object_mode` are per box (or broadcastable scalars).
     """
     gap = object_mode - threshold
-    if gap < 1e-3:
-        return np.ones_like(scores, dtype=np.float32)
-    return np.clip((scores - threshold) / gap, 0.0, 1.0).astype(np.float32)
+    ramp = ((scores - threshold) / gap.clamp(min=1e-3)).clamp(0.0, 1.0)
+    return torch.where(gap < 1e-3, torch.ones_like(scores), ramp).float()
+
+
+class ScoreHistograms:
+    """
+    EMA of the normalised candidate score histogram of each COCO size bin (one shared histogram
+    when size bins are off), and the ground thresholds derived from it.
+    """
+
+    def __init__(
+        self,
+        conf_floor: float = 0.001,
+        fallback: float = 0.4,
+        size_bins: bool = True,
+        n_bins: int = N_SCORE_BINS,
+    ) -> None:
+        self.conf_floor = conf_floor
+        self.fallback = fallback
+        self.size_bins = size_bins
+        self.n_bins = n_bins
+        self.names = list(SIZE_BINS) if size_bins else [SHARED_HISTOGRAM]
+        self.densities = {name: np.zeros(n_bins) for name in self.names}
+
+    def merge_counts(self, counts: np.ndarray) -> dict[str, np.ndarray]:
+        """Per-histogram counts from (size bins x score bins) candidate counts."""
+        if not self.size_bins:
+            return {SHARED_HISTOGRAM: counts.sum(axis=0)}
+        return dict(zip(self.names, counts))
+
+    def reset(self, counts: np.ndarray) -> None:
+        """Start the histograms from (size bins x score bins) candidate counts."""
+        for name, c in self.merge_counts(counts).items():
+            total = c.sum()
+            self.densities[name] = c / total if total > 0 else np.zeros(self.n_bins)
+
+    def update(self, counts: np.ndarray, decay: float) -> None:
+        """
+        EMA step with the normalised histograms of a batch's candidates. A histogram whose batch
+        has no candidates keeps its previous vector; an empty one is started from the batch's.
+        """
+        for name, c in self.merge_counts(counts).items():
+            total = c.sum()
+            if total == 0:
+                continue
+            density = c / total
+            previous = self.densities[name]
+            self.densities[name] = (
+                density if previous.sum() == 0 else decay * previous + (1.0 - decay) * density
+            )
+
+    def thresholds(self) -> dict[str, BinThreshold]:
+        """Ground threshold of every size bin (the shared one for all bins when size bins are off)."""
+        fitted = {
+            name: fit_bin_threshold(d, self.conf_floor, self.fallback)
+            for name, d in self.densities.items()
+        }
+        if not self.size_bins:
+            return {size_bin: fitted[SHARED_HISTOGRAM] for size_bin in SIZE_BINS}
+        return fitted
+
+    def state_dict(self) -> dict[str, Any]:
+        return {name: d.tolist() for name, d in self.densities.items()}
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        self.densities = {name: np.asarray(state[name], dtype=np.float64) for name in self.names}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -201,158 +237,361 @@ def box_weights(
 
 @dataclass
 class Detections:
-    """Boxes (x1, y1, x2, y2 in image pixels), scores and class ids of one image."""
+    """Candidate boxes (x1, y1, x2, y2 in batch-image pixels) of several images."""
 
-    boxes: np.ndarray
-    scores: np.ndarray
-    classes: np.ndarray
+    boxes: torch.Tensor
+    scores: torch.Tensor
+    classes: torch.Tensor
+    image: torch.Tensor  # index of the image each box belongs to
 
     def __len__(self) -> int:
         return len(self.scores)
 
+    @property
+    def areas(self) -> torch.Tensor:
+        return (self.boxes[:, 2] - self.boxes[:, 0]) * (self.boxes[:, 3] - self.boxes[:, 1])
 
-def detections_from_result(result: Any, flipped: bool = False) -> Detections:
-    """
-    Teacher detections of one image view. Boxes predicted on a horizontally flipped view are
-    mapped back to the original image. Coordinates are kept in float64.
-    """
-    if result.boxes is None or len(result.boxes) == 0:
-        return Detections(np.empty((0, 4)), np.empty(0), np.empty(0, dtype=np.int64))
+    def __getitem__(self, keep: torch.Tensor) -> Detections:
+        return Detections(self.boxes[keep], self.scores[keep], self.classes[keep], self.image[keep])
 
-    boxes = result.boxes.xyxy.detach().cpu().numpy().astype(np.float64)
-    if flipped:
-        width = float(result.orig_shape[1])
-        boxes[:, [0, 2]] = width - boxes[:, [2, 0]]
-    return Detections(
-        boxes=boxes,
-        scores=result.boxes.conf.detach().cpu().numpy().astype(np.float64),
-        classes=result.boxes.cls.detach().cpu().numpy().astype(np.int64),
+
+def detections_from_outputs(outputs: list[torch.Tensor]) -> Detections:
+    """Flatten per-image (n, 6) [x1, y1, x2, y2, score, class] predictions."""
+    image = torch.cat(
+        [torch.full((len(o),), i, dtype=torch.long, device=o.device) for i, o in enumerate(outputs)]
     )
+    rows = torch.cat(outputs).float()
+    return Detections(rows[:, :4], rows[:, 4], rows[:, 5].long(), image)
+
+
+def unflip(detections: Detections, width: int) -> Detections:
+    """Map boxes predicted on a horizontally flipped view back to the original view."""
+    boxes = detections.boxes.clone()
+    boxes[:, [0, 2]] = width - detections.boxes[:, [2, 0]]
+    return Detections(boxes, detections.scores, detections.classes, detections.image)
 
 
 def merge_views(views: Sequence[Detections], iou_threshold: float) -> Detections:
-    """Merge the detections of all views with class-wise NMS (highest scores first)."""
-    boxes = np.concatenate([view.boxes for view in views])
-    scores = np.concatenate([view.scores for view in views])
-    classes = np.concatenate([view.classes for view in views])
-    if len(scores) == 0:
-        return Detections(boxes, scores, classes)
-
-    keep = batched_nms(
-        torch.from_numpy(boxes).float(),
-        torch.from_numpy(scores).float(),
-        torch.from_numpy(classes),
-        iou_threshold,
-    ).numpy()
-    return Detections(boxes[keep], scores[keep], classes[keep])
-
-
-def candidate_frame(
-    detections: Detections,
-    image_path: Path,
-    label_path: Path,
-    image_size: tuple[int, int],
-    bin_scale: float,
-) -> pl.DataFrame:
-    """Candidate rows of one image; `bin_scale` maps box areas to the scale they are binned at."""
-    img_width, img_height = image_size
-    x1, y1, x2, y2 = detections.boxes.T
-    w, h = x2 - x1, y2 - y1
-    return pl.DataFrame(
-        {
-            "image_stem": [image_path.stem] * len(detections),
-            "label_path": [str(label_path)] * len(detections),
-            "img_width": [img_width] * len(detections),
-            "img_height": [img_height] * len(detections),
-            "class_id": detections.classes,
-            "score": detections.scores,
-            "x1": x1,
-            "y1": y1,
-            "x2": x2,
-            "y2": y2,
-            "w": w,
-            "h": h,
-            "size_bin": assign_size_bins(w * h * bin_scale**2),
-        },
-        schema=CANDIDATE_SCHEMA,
+    """Merge the detections of all views with NMS per image and class (highest scores first)."""
+    merged = Detections(
+        boxes=torch.cat([v.boxes for v in views]),
+        scores=torch.cat([v.scores for v in views]),
+        classes=torch.cat([v.classes for v in views]),
+        image=torch.cat([v.image for v in views]),
     )
+    if len(merged) == 0:
+        return merged
+    groups = merged.image * (int(merged.classes.max()) + 1) + merged.classes
+    keep = batched_nms(merged.boxes, merged.scores, groups, iou_threshold)
+    return merged[keep]
+
+
+def erased_fraction(
+    detections: Detections, erase_boxes: torch.Tensor, image_size: tuple[int, int]
+) -> torch.Tensor:
+    """
+    Fraction of each box covered by the erased patches of its image. `erase_boxes` is (M, 5)
+    [image, x1, y1, x2, y2] in batch-image pixels.
+    """
+    fraction = torch.zeros(len(detections), device=detections.boxes.device)
+    if len(detections) == 0 or len(erase_boxes) == 0:
+        return fraction
+    height, width = image_size
+    for image in erase_boxes[:, 0].long().unique().tolist():
+        in_image = detections.image == image
+        if not in_image.any():
+            continue
+        mask = torch.zeros((height + 1, width + 1), device=detections.boxes.device)
+        for x1, y1, x2, y2 in erase_boxes[erase_boxes[:, 0] == image, 1:].round().long().tolist():
+            mask[y1 + 1 : y2 + 1, x1 + 1 : x2 + 1] = 1.0
+        integral = mask.cumsum(0).cumsum(1)
+        boxes = detections.boxes[in_image].round().long()
+        x1, x2 = boxes[:, 0].clamp(0, width), boxes[:, 2].clamp(0, width)
+        y1, y2 = boxes[:, 1].clamp(0, height), boxes[:, 3].clamp(0, height)
+        covered = integral[y2, x2] - integral[y1, x2] - integral[y2, x1] + integral[y1, x1]
+        area = ((x2 - x1) * (y2 - y1)).float()
+        fraction[in_image] = torch.where(area > 0, covered / area.clamp(min=1.0), 0.0)
+    return fraction
 
 
 # ---------------------------------------------------------------------------------------------
-# Pseudo-label selection
+# Per-step labelling
 # ---------------------------------------------------------------------------------------------
 
 
-def select_pseudo_labels(
-    candidates: pl.DataFrame,
-    thresholds: dict[str, BinThreshold],
-    soft_weights: bool,
-) -> pl.DataFrame:
-    """
-    Keep the candidates at or above their size bin's threshold and add a `weight` column: the
-    threshold-aware soft weight, or 1 for every box when soft weights are off.
-    """
-    parts = []
-    for size_bin, bin_threshold in thresholds.items():
-        kept = candidates.filter(
-            (pl.col("size_bin") == size_bin) & (pl.col("score") >= bin_threshold.threshold)
+@dataclass
+class StepLabels:
+    """Pseudo-labels of one training step, per size bin."""
+
+    counts: np.ndarray  # (size bins, score bins): all candidates, kept or not
+    kept: np.ndarray  # (size bins,): pseudo boxes added to the batch
+    weight_sums: np.ndarray  # (size bins,): sum of their weights
+    labeled_images: int  # unlabeled images with at least one pseudo box
+
+
+class OnlinePseudoLabeler:
+    """Teacher pseudo-labels for the unlabeled images of a training batch."""
+
+    def __init__(
+        self,
+        conf: float = 0.001,
+        iou_threshold: float = 0.5,
+        multi_view: bool = True,
+        soft_weights: bool = True,
+        erase_drop_ratio: float = 0.5,
+        n_bins: int = N_SCORE_BINS,
+    ) -> None:
+        self.conf = conf  # candidate confidence floor
+        self.iou_threshold = iou_threshold  # NMS IoU for merging the views
+        self.multi_view = multi_view  # False: normal view only
+        self.soft_weights = soft_weights
+        self.erase_drop_ratio = erase_drop_ratio  # drop pseudo boxes at least this fraction erased
+        self.n_bins = n_bins
+
+    @torch.no_grad()
+    def candidates(self, model: torch.nn.Module, imgs: torch.Tensor) -> Detections:
+        """Teacher candidates of uint8 (B, 3, H, W) images on the normal (and flipped) view."""
+        images = imgs.float() / 255.0
+        views = [self._predict(model, images)]
+        if self.multi_view:
+            views.append(unflip(self._predict(model, images.flip(-1)), images.shape[-1]))
+            return merge_views(views, self.iou_threshold)
+        return views[0]
+
+    def _predict(self, model: torch.nn.Module, images: torch.Tensor) -> Detections:
+        with torch.autocast(images.device.type, enabled=images.device.type == "cuda"):
+            preds = model(images)
+        outputs = non_max_suppression(
+            preds,
+            conf_thres=self.conf,
+            iou_thres=VIEW_NMS_IOU,
+            end2end=getattr(model, "end2end", False),
         )
+        return detections_from_outputs(outputs)
+
+    def count(self, detections: Detections) -> np.ndarray:
+        """(size bins x score bins) counts of candidate scores over [conf, 1]."""
+        bins = size_bin_index(detections.areas)
+        return np.stack([
+            torch.histc(detections.scores[bins == b], bins=self.n_bins, min=self.conf, max=1.0)
+            .cpu()
+            .numpy()
+            for b in range(len(SIZE_BINS))
+        ]).astype(np.int64)
+
+    def label(
+        self,
+        model: torch.nn.Module,
+        batch: dict[str, Any],
+        thresholds: dict[str, BinThreshold],
+    ) -> StepLabels:
+        """
+        Pseudo-label the batch's unlabeled images (`is_pseudo`) from their weak views
+        (`teacher_img`) and append the boxes kept by their size bin's threshold to the batch
+        targets (`bboxes`, `cls`, `batch_idx`, `pl_weight`), dropping boxes mostly erased in the
+        Student view. Returns the step's candidate histograms and pseudo-label counts.
+        """
+        n_size_bins = len(SIZE_BINS)
+        rows = torch.where(batch["is_pseudo"])[0]
+        if len(rows) == 0:
+            return StepLabels(
+                np.zeros((n_size_bins, self.n_bins), dtype=np.int64),
+                np.zeros(n_size_bins, dtype=np.int64),
+                np.zeros(n_size_bins),
+                0,
+            )
+
+        detections = self.candidates(model, batch["teacher_img"])
+        counts = self.count(detections)
+
+        bins = size_bin_index(detections.areas)
+        device = detections.scores.device
+        threshold = torch.tensor([thresholds[b].threshold for b in SIZE_BINS], device=device)[bins]
+        object_mode = torch.tensor([thresholds[b].object_mode for b in SIZE_BINS], device=device)[bins]
+        keep = detections.scores >= threshold
+
+        height, width = batch["img"].shape[-2:]
+        erase_boxes = batch.get("erase_boxes")
+        if erase_boxes is not None and len(erase_boxes) > 0:
+            # Patches are indexed by batch row, detections by position among the unlabeled rows
+            position = torch.full((len(batch["is_pseudo"]),), -1, dtype=torch.long, device=device)
+            position[rows.to(device)] = torch.arange(len(rows), device=device)
+            patches = erase_boxes.to(device).clone()
+            patches[:, 0] = position[patches[:, 0].long()].float()
+            patches = patches[patches[:, 0] >= 0]
+            keep &= erased_fraction(detections, patches, (height, width)) < self.erase_drop_ratio
+
+        kept = detections[keep]
+        bins, threshold, object_mode = bins[keep], threshold[keep], object_mode[keep]
         weights = (
-            box_weights(kept["score"].to_numpy(), bin_threshold.threshold, bin_threshold.object_mode)
-            if soft_weights
-            else np.ones(len(kept), dtype=np.float32)
+            box_weights(kept.scores, threshold, object_mode)
+            if self.soft_weights
+            else torch.ones_like(kept.scores)
         )
-        parts.append(kept.with_columns(weight=pl.Series(weights, dtype=pl.Float32)))
-    if not parts:
-        return candidates.clear().with_columns(weight=pl.lit(None, dtype=pl.Float32))
-    return pl.concat(parts)
+        self._append_targets(batch, kept, rows, weights, (height, width))
+
+        return StepLabels(
+            counts=counts,
+            kept=torch.bincount(bins, minlength=n_size_bins).cpu().numpy(),
+            weight_sums=torch.bincount(bins, weights=weights, minlength=n_size_bins).cpu().numpy(),
+            labeled_images=int(kept.image.unique().numel()),
+        )
+
+    @staticmethod
+    def _append_targets(
+        batch: dict[str, Any],
+        kept: Detections,
+        rows: torch.Tensor,
+        weights: torch.Tensor,
+        image_size: tuple[int, int],
+    ) -> None:
+        """
+        Append pseudo boxes (normalised xywh) to the batch targets of their images, keeping the
+        targets sorted by image as Ultralytics' loss preprocessing expects.
+        """
+        height, width = image_size
+        x1, y1, x2, y2 = kept.boxes.clamp(min=0).unbind(1)
+        x1, x2 = x1.clamp(max=width), x2.clamp(max=width)
+        y1, y2 = y1.clamp(max=height), y2.clamp(max=height)
+        xywh = torch.stack(
+            [(x1 + x2) / (2 * width), (y1 + y2) / (2 * height), (x2 - x1) / width, (y2 - y1) / height],
+            dim=1,
+        )
+        device = batch["bboxes"].device
+        batch["bboxes"] = torch.cat([batch["bboxes"], xywh.to(device, batch["bboxes"].dtype)])
+        batch["cls"] = torch.cat(
+            [batch["cls"], kept.classes.view(-1, 1).to(device, batch["cls"].dtype)]
+        )
+        batch["batch_idx"] = torch.cat(
+            [batch["batch_idx"], rows.to(kept.image.device)[kept.image].to(device, batch["batch_idx"].dtype)]
+        )
+        batch["pl_weight"] = torch.cat([batch["pl_weight"], weights.to(device, batch["pl_weight"].dtype)])
+        order = torch.argsort(batch["batch_idx"], stable=True)
+        for key in ("bboxes", "cls", "batch_idx", "pl_weight"):
+            batch[key] = batch[key][order]
 
 
-def size_bin_stats(labels: pl.DataFrame) -> dict[str, dict[str, float]]:
-    """Share of pseudo-labels and their mean weight in each size bin."""
-    stats = {}
-    for size_bin in SIZE_BINS:
-        weights = labels.filter(pl.col("size_bin") == size_bin)["weight"]
-        stats[size_bin] = {
-            "share": len(weights) / max(1, len(labels)),
-            "mean_weight": float(weights.mean()) if len(weights) else 0.0,  # type: ignore[arg-type]
+# ---------------------------------------------------------------------------------------------
+# Per-epoch pseudo-label log
+# ---------------------------------------------------------------------------------------------
+
+
+@dataclass
+class PseudoLabelLog:
+    """
+    Pseudo-label statistics and histograms of one epoch: summary columns for results.csv,
+    the end-of-epoch histograms for histograms.csv and every step's raw candidate counts,
+    pseudo-label counts and thresholds for histograms/epoch_<k>.npz.
+    """
+
+    counts: list[np.ndarray] = field(default_factory=list)
+    kept: list[np.ndarray] = field(default_factory=list)
+    weight_sums: list[np.ndarray] = field(default_factory=list)
+    thresholds: list[np.ndarray] = field(default_factory=list)
+    object_modes: list[np.ndarray] = field(default_factory=list)
+    labeled_images: int = 0
+
+    def add(self, step: StepLabels, thresholds: dict[str, BinThreshold]) -> None:
+        self.counts.append(step.counts)
+        self.kept.append(step.kept)
+        self.weight_sums.append(step.weight_sums)
+        self.thresholds.append(np.array([thresholds[b].threshold for b in SIZE_BINS]))
+        self.object_modes.append(np.array([thresholds[b].object_mode for b in SIZE_BINS]))
+        self.labeled_images += step.labeled_images
+
+    def columns(self) -> dict[str, float]:
+        """Summary columns: labeled images, boxes, per-bin share and mean weight, mean thresholds."""
+        n_size_bins = len(SIZE_BINS)
+        kept = np.sum(self.kept, axis=0) if self.kept else np.zeros(n_size_bins)
+        weight_sums = np.sum(self.weight_sums, axis=0) if self.weight_sums else np.zeros(n_size_bins)
+        thresholds = np.mean(self.thresholds, axis=0) if self.thresholds else np.zeros(n_size_bins)
+        object_modes = np.mean(self.object_modes, axis=0) if self.object_modes else np.zeros(n_size_bins)
+        columns: dict[str, float] = {
+            "pl_images": float(self.labeled_images),
+            "pl_boxes": float(kept.sum()),
         }
-    return stats
+        for i, b in enumerate(SIZE_BINS):
+            columns[f"threshold/{b}"] = float(thresholds[i])
+        for i, b in enumerate(SIZE_BINS):
+            columns[f"object_mode/{b}"] = float(object_modes[i])
+        for i, b in enumerate(SIZE_BINS):
+            columns[f"pl_share/{b}"] = float(kept[i] / max(1.0, kept.sum()))
+        for i, b in enumerate(SIZE_BINS):
+            columns[f"pl_weight/{b}"] = float(weight_sums[i] / kept[i]) if kept[i] else 0.0
+        return columns
+
+    def save(self, exp_dir: Path, epoch: int, histograms: ScoreHistograms) -> None:
+        """Append the epoch's histograms to histograms.csv and save its per-step arrays."""
+        n_size_bins = len(SIZE_BINS)
+        epoch_counts = (
+            np.sum(self.counts, axis=0)
+            if self.counts
+            else np.zeros((n_size_bins, histograms.n_bins), dtype=np.int64)
+        )
+        append_histograms(exp_dir, epoch, histograms, epoch_counts)
+        steps_dir = exp_dir / "histograms"
+        steps_dir.mkdir(parents=True, exist_ok=True)
+        empty = np.zeros((0, n_size_bins))
+        np.savez_compressed(
+            steps_dir / f"epoch_{epoch}.npz",
+            size_bins=np.array(list(SIZE_BINS)),
+            counts=np.asarray(self.counts, dtype=np.int32).reshape(-1, n_size_bins, histograms.n_bins),
+            kept=np.asarray(self.kept, dtype=np.int32).reshape(-1, n_size_bins),
+            thresholds=np.asarray(self.thresholds).reshape(-1, n_size_bins) if self.thresholds else empty,
+            object_modes=np.asarray(self.object_modes).reshape(-1, n_size_bins) if self.object_modes else empty,
+        )
+
+
+HISTOGRAM_FIELDS = ["epoch", "size_bin", "bin", "bin_lo", "bin_hi", "ema", "counts"]
+
+
+def append_histograms(
+    exp_dir: Path, epoch: int, histograms: ScoreHistograms, counts: np.ndarray
+) -> None:
+    """
+    Append one epoch to histograms.csv: each histogram's EMA density and the raw candidate
+    counts (size bins x score bins, merged like the histograms) behind it in that epoch.
+    """
+    path = exp_dir / "histograms.csv"
+    write_header = not path.is_file() or path.stat().st_size == 0
+    edges = np.linspace(histograms.conf_floor, 1.0, histograms.n_bins + 1)
+    merged = histograms.merge_counts(counts)
+    with open(path, "a", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        if write_header:
+            writer.writerow(HISTOGRAM_FIELDS)
+        for name in histograms.names:
+            for i in range(histograms.n_bins):
+                writer.writerow([
+                    epoch, name, i, f"{edges[i]:.6f}", f"{edges[i + 1]:.6f}",
+                    f"{histograms.densities[name][i]:.8g}", int(merged[name][i]),
+                ])
+
+
+def truncate_histogram_log(exp_dir: Path, last_epoch: int) -> None:
+    """Drop histograms.csv rows and step files of epochs after `last_epoch` (on resume)."""
+    path = exp_dir / "histograms.csv"
+    if path.is_file():
+        with open(path, encoding="utf-8", newline="") as f:
+            rows = [row for row in csv.DictReader(f) if int(row["epoch"]) <= last_epoch]
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=HISTOGRAM_FIELDS)
+            writer.writeheader()
+            writer.writerows(rows)
+    for step_file in (exp_dir / "histograms").glob("epoch_*.npz"):
+        if int(step_file.stem.removeprefix("epoch_")) > last_epoch:
+            step_file.unlink()
 
 
 # ---------------------------------------------------------------------------------------------
-# Dataset files and label I/O
+# Unlabeled image pool
 # ---------------------------------------------------------------------------------------------
-
-
-def resolve_dataset_paths(
-    dataset_path: Path | str,
-    labels_dir: Path | str | None = None,
-) -> tuple[Path, Path]:
-    """
-    Images directory (the `images` subdirectory if there is one) and labels directory (given, or
-    the images path with its last `images` component replaced by `labels`).
-    """
-    base_path = Path(dataset_path).resolve()
-    if (base_path / "images").is_dir() and base_path.name != "images":
-        images_dir = base_path / "images"
-    else:
-        images_dir = base_path
-
-    if labels_dir is not None:
-        return images_dir, Path(labels_dir).resolve()
-    if "images" in images_dir.parts:
-        parts = list(images_dir.parts)
-        last = max(i for i, part in enumerate(parts) if part == "images")
-        parts[last] = "labels"
-        return images_dir, Path(*parts)
-    return images_dir, images_dir.parent / "labels"
 
 
 def list_images(images_dir: Path) -> list[Path]:
     """All image files under `images_dir`, sorted."""
     return sorted(
-        p for p in images_dir.rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES
+        p for p in Path(images_dir).rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES
     )
 
 
@@ -371,451 +610,3 @@ def sample_image_files(
     rng = np.random.default_rng(seed)
     chosen = np.sort(rng.choice(len(image_files), size=sample_images, replace=False))
     return [image_files[i] for i in chosen]
-
-
-def clean_dataset_annotations(
-    labels_dir: Path | str,
-    dataset_root: Path | str | None = None,
-    logger: logging.Logger | None = None,
-) -> int:
-    """
-    Remove all existing .txt label files and stale cache files in labels_dir and dataset_root.
-    Returns the number of deleted .txt files.
-    """
-    labels_path = Path(labels_dir)
-    deleted_txt = 0
-    if labels_path.is_dir():
-        for txt_file in labels_path.rglob("*.txt"):
-            if txt_file.is_file():
-                txt_file.unlink()
-                deleted_txt += 1
-
-    cache_dirs = [labels_path] + ([Path(dataset_root)] if dataset_root is not None else [])
-    deleted_caches = 0
-    for cache_dir in cache_dirs:
-        if cache_dir.is_dir():
-            for cache_file in cache_dir.rglob("*.cache"):
-                if cache_file.is_file():
-                    cache_file.unlink()
-                    deleted_caches += 1
-
-    labels_path.mkdir(parents=True, exist_ok=True)
-    if logger:
-        logger.info(
-            f"Cleaned annotations in {labels_path}: deleted {deleted_txt} .txt files, "
-            f"{deleted_caches} cache files."
-        )
-    return deleted_txt
-
-
-def read_images(
-    paths: Sequence[Path], pool: ThreadPoolExecutor
-) -> list[tuple[Path, np.ndarray]]:
-    """Decode images in parallel, skipping unreadable files."""
-    images = pool.map(lambda path: cv2.imread(str(path)), paths)
-    return [(path, image) for path, image in zip(paths, images) if image is not None]
-
-
-def with_yolo_columns(labels: pl.DataFrame, with_weights: bool) -> pl.DataFrame:
-    """
-    Add normalised YOLO box columns and the label-file `line`
-    (`class x_center y_center width height [weight]`).
-    """
-    labels = labels.with_columns(
-        x_center=((pl.col("x1") + pl.col("x2")) / (2.0 * pl.col("img_width"))).clip(0.0, 1.0),
-        y_center=((pl.col("y1") + pl.col("y2")) / (2.0 * pl.col("img_height"))).clip(0.0, 1.0),
-        w_norm=((pl.col("x2") - pl.col("x1")) / pl.col("img_width")).clip(0.0, 1.0),
-        h_norm=((pl.col("y2") - pl.col("y1")) / pl.col("img_height")).clip(0.0, 1.0),
-    )
-    fields = [
-        pl.col("class_id").cast(pl.String),
-        *(pl.col(c).round(6).cast(pl.String) for c in ("x_center", "y_center", "w_norm", "h_norm")),
-        *([pl.col("weight").round(4).cast(pl.String)] if with_weights else []),
-    ]
-    return labels.with_columns(line=pl.concat_str(fields, separator=" "))
-
-
-def write_yolo_labels(labels: pl.DataFrame) -> int:
-    """Write one YOLO label file per image (images without pseudo-labels get no file)."""
-    files = labels.group_by("label_path").agg(content=pl.col("line").str.join("\n"))
-    for row in files.iter_rows(named=True):
-        target = Path(row["label_path"])
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(row["content"] + "\n", encoding="utf-8")
-    return len(files)
-
-
-def save_candidates(candidates: pl.DataFrame, path: Path | str) -> None:
-    """Save raw candidate detections as Parquet (for offline analysis)."""
-    destination = Path(path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    candidates.write_parquet(destination)
-
-
-# ---------------------------------------------------------------------------------------------
-# Generator
-# ---------------------------------------------------------------------------------------------
-
-
-@dataclass
-class ImagePool:
-    """Unlabeled images to pseudo-label and where their label files go."""
-
-    images_dir: Path
-    labels_dir: Path
-    files: list[Path]
-
-    def label_path(self, image_path: Path) -> Path:
-        return self.labels_dir / image_path.relative_to(self.images_dir).with_suffix(".txt")
-
-
-@dataclass(frozen=True)
-class PseudoLabelResult:
-    """Outcome of one pseudo-labeling pass."""
-
-    images_processed: int
-    total_candidates: int
-    candidates_df: pl.DataFrame
-    filtered_df: pl.DataFrame
-    thresholds: dict[str, float] = field(default_factory=dict)
-    object_modes: dict[str, float] = field(default_factory=dict)
-    bin_stats: dict[str, dict[str, float]] = field(default_factory=dict)
-    labeled_images: int = 0
-    labels_written: int = 0
-
-
-class PseudoLabelGenerator:
-    """
-    Generates pseudo-labels for unlabeled images using batched multi-view candidate inference
-    and COCO size-bin ground thresholding.
-    """
-
-    def __init__(
-        self,
-        teacher_model: YOLO | str | Path,
-        batch_size: int = 32,
-        half: bool = True,
-        workers: int = 4,
-        conf: float = 0.001,
-        iou_threshold: float = 0.5,
-        fallback_threshold: float = 0.4,
-        soft_weights: bool = True,
-        size_bins: bool = True,
-        multi_view: bool = True,
-        imgsz: int = 640,
-        input_scale_bins: bool = True,
-        device: str | torch.device | None = None,
-        logger: logging.Logger | None = None,
-    ) -> None:
-        self.model = YOLO(str(teacher_model)) if isinstance(teacher_model, (str, Path)) else teacher_model
-        self.batch_size = max(1, batch_size)
-        self.half = half
-        self.workers = max(1, workers)
-        self.conf = conf  # candidate confidence floor
-        self.iou_threshold = iou_threshold  # NMS IoU for merging the views
-        self.fallback_threshold = fallback_threshold  # threshold of a bin without a score valley
-        self.soft_weights = soft_weights
-        self.size_bins = size_bins  # False: one shared threshold for all boxes
-        self.multi_view = multi_view  # False: normal view only
-        self.imgsz = imgsz
-        self.input_scale_bins = input_scale_bins  # False: size bins in original image pixels
-        self.device = device
-        self.logger = logger or get_logger()
-        self._image_lists: dict[Path, list[Path]] = {}
-
-    def generate(
-        self,
-        images_dir: Path | str,
-        labels_dir: Path | str | None = None,
-        max_images: int | None = None,
-        save_candidates_path: Path | str | None = None,
-        sample_images: int | None = None,
-        sample_seed: int = 0,
-    ) -> PseudoLabelResult:
-        """
-        Pseudo-label the images in `images_dir` (or a uniform random sample of `sample_images` of
-        them) and write the labels to `labels_dir`, replacing any existing ones.
-        """
-        pool = self._image_pool(images_dir, labels_dir, max_images, sample_images, sample_seed)
-        clean_dataset_annotations(pool.labels_dir, pool.images_dir.parent, self.logger)
-
-        candidates = self._collect_candidates(pool)
-        if save_candidates_path is not None:
-            save_candidates(candidates, save_candidates_path)
-        if candidates.is_empty():
-            self.logger.warning("No candidate detections were found.")
-            return self._empty_result(pool, candidates)
-
-        thresholds = self._fit_thresholds(candidates)
-        labels = select_pseudo_labels(candidates, thresholds, self.soft_weights)
-        labels = with_yolo_columns(labels, with_weights=self.soft_weights)
-        labels_written = write_yolo_labels(labels)
-
-        result = PseudoLabelResult(
-            images_processed=len(pool.files),
-            total_candidates=len(candidates),
-            candidates_df=candidates,
-            filtered_df=labels,
-            thresholds={b: t.threshold for b, t in thresholds.items()},
-            object_modes={b: t.object_mode for b, t in thresholds.items()},
-            bin_stats=size_bin_stats(labels),
-            labeled_images=labels["image_stem"].n_unique(),
-            labels_written=labels_written,
-        )
-        self._log_summary(result, pool)
-        return result
-
-    def _image_pool(
-        self,
-        images_dir: Path | str,
-        labels_dir: Path | str | None,
-        max_images: int | None,
-        sample_images: int | None,
-        sample_seed: int,
-    ) -> ImagePool:
-        """Resolve the dataset directories and choose the images of this pass."""
-        resolved_images, resolved_labels = resolve_dataset_paths(images_dir, labels_dir)
-        if resolved_images not in self._image_lists:
-            self._image_lists[resolved_images] = list_images(resolved_images)
-        files = self._image_lists[resolved_images]
-        if max_images is not None and max_images > 0:
-            files = files[:max_images]
-
-        chosen = sample_image_files(files, sample_images, sample_seed)
-        self.logger.info(
-            f"Pseudo-labeling {len(chosen)} of {len(files)} images in {resolved_images} "
-            f"(seed={sample_seed})."
-        )
-        return ImagePool(resolved_images, resolved_labels, chosen)
-
-    def _collect_candidates(self, pool: ImagePool) -> pl.DataFrame:
-        """Batched multi-view Teacher inference over the pool -> one row per candidate box."""
-        self.model.predictor = None  # rebuild the predictor for the current Teacher weights
-        frames = [pl.DataFrame(schema=CANDIDATE_SCHEMA)]
-        batches = [
-            pool.files[i : i + self.batch_size] for i in range(0, len(pool.files), self.batch_size)
-        ]
-        with ThreadPoolExecutor(max_workers=self.workers) as io_pool, tqdm(
-            total=len(pool.files), desc="Multi-view inference"
-        ) as progress:
-            for batch in batches:
-                images = read_images(batch, io_pool)
-                if images:
-                    frames += self._batch_candidates(images, pool, io_pool)
-                progress.update(len(batch))
-
-        candidates = pl.concat(frames)
-        self.logger.info(f"Extracted {len(candidates)} candidate detections.")
-        return candidates
-
-    def _batch_candidates(
-        self,
-        images: list[tuple[Path, np.ndarray]],
-        pool: ImagePool,
-        io_pool: ThreadPoolExecutor,
-    ) -> list[pl.DataFrame]:
-        """Candidates of each image in a batch, merged over its views."""
-        views_per_image = self._predict_views([image for _, image in images], io_pool)
-        frames = []
-        for (path, image), views in zip(images, views_per_image):
-            img_height, img_width = image.shape[:2]
-            bin_scale = input_scale(img_width, img_height, self.imgsz) if self.input_scale_bins else 1.0
-            detections = merge_views(views, self.iou_threshold)
-            frames.append(
-                candidate_frame(detections, path, pool.label_path(path), (img_width, img_height), bin_scale)
-            )
-        return frames
-
-    def _predict_views(
-        self, images: list[np.ndarray], io_pool: ThreadPoolExecutor
-    ) -> list[list[Detections]]:
-        """Teacher detections of every image on the normal (and, if multi-view, flipped) view."""
-        predict_args: dict[str, Any] = {
-            "batch": len(images),
-            "imgsz": self.imgsz,
-            "half": self.half,
-            "conf": self.conf,
-            "verbose": False,
-        }
-        if self.device is not None:
-            predict_args["device"] = self.device
-
-        normal = [detections_from_result(r) for r in self.model.predict(images, **predict_args)]
-        if not self.multi_view:
-            return [[view] for view in normal]
-
-        flips = list(io_pool.map(lambda image: cv2.flip(image, 1), images))
-        flipped = [
-            detections_from_result(r, flipped=True) for r in self.model.predict(flips, **predict_args)
-        ]
-        return [[n, f] for n, f in zip(normal, flipped)]
-
-    def _fit_thresholds(self, candidates: pl.DataFrame) -> dict[str, BinThreshold]:
-        """Ground threshold of each size bin (one shared threshold when size bins are off)."""
-        if not self.size_bins:
-            shared = self._fit_logged(candidates["score"], "All size bins")
-            return {size_bin: shared for size_bin in SIZE_BINS}
-        return {
-            size_bin: self._fit_logged(
-                candidates.filter(pl.col("size_bin") == size_bin)["score"], f"Size bin '{size_bin}'"
-            )
-            for size_bin in SIZE_BINS
-        }
-
-    def _fit_logged(self, scores: pl.Series, group: str) -> BinThreshold:
-        values = scores.to_numpy().astype(float)
-        fitted = fit_bin_threshold(values, self.conf, self.fallback_threshold)
-        if fitted.from_valley:
-            self.logger.info(
-                f"{group}: count={len(values)}, ground threshold={fitted.threshold:.4f}, "
-                f"object mode={fitted.object_mode:.4f}"
-            )
-        else:
-            self.logger.warning(
-                f"{group}: no score valley found (count={len(values)}); "
-                f"using fallback threshold={fitted.threshold:.4f}"
-            )
-        return fitted
-
-    def _empty_result(self, pool: ImagePool, candidates: pl.DataFrame) -> PseudoLabelResult:
-        labels = with_yolo_columns(select_pseudo_labels(candidates, {}, False), self.soft_weights)
-        return PseudoLabelResult(
-            images_processed=len(pool.files),
-            total_candidates=0,
-            candidates_df=candidates,
-            filtered_df=labels,
-        )
-
-    def _log_summary(self, result: PseudoLabelResult, pool: ImagePool) -> None:
-        boxes = len(result.filtered_df)
-        self.logger.info(
-            f"Kept {boxes} of {result.total_candidates} candidates as pseudo-labels "
-            f"({result.labeled_images} labeled images, "
-            f"{boxes / max(1, result.labeled_images):.2f} boxes/image)."
-        )
-        self.logger.info(
-            "Pseudo-label size-bin shares / mean weights: "
-            + ", ".join(
-                f"{b}={s['share']:.3f}/{s['mean_weight']:.3f}" for b, s in result.bin_stats.items()
-            )
-        )
-        self.logger.info(f"Saved {result.labels_written} YOLO label files into {pool.labels_dir}")
-
-
-# ---------------------------------------------------------------------------------------------
-# Command-line interface
-# ---------------------------------------------------------------------------------------------
-
-
-@app.command()
-def main(
-    images: Path = typer.Option(
-        ...,
-        "--images",
-        "-i",
-        help="Path to directory containing unlabeled images.",
-        exists=True,
-        file_okay=False,
-        dir_okay=True,
-        readable=True,
-    ),
-    model: Path = typer.Option(
-        ...,
-        "--model",
-        "-m",
-        help="Path to the YOLO Teacher model weights.",
-        exists=True,
-        file_okay=True,
-        dir_okay=False,
-        readable=True,
-    ),
-    labels: Optional[Path] = typer.Option(
-        None,
-        "--labels",
-        "-l",
-        help="Path to output labels directory (auto-inferred if omitted).",
-    ),
-    save_candidates_path: Optional[Path] = typer.Option(
-        None,
-        "--save-candidates",
-        "-s",
-        help="Optional destination path to save raw candidate detections as Parquet.",
-    ),
-    max_images: Optional[int] = typer.Option(
-        None,
-        "--max-images",
-        "-n",
-        help="Maximum number of images to process (useful for test runs).",
-        min=1,
-    ),
-    batch_size: int = typer.Option(32, "--batch-size", "-b", help="Inference batch size.", min=1),
-    half: bool = typer.Option(
-        True, "--half/--no-half", help="Use FP16 half-precision inference on GPU."
-    ),
-    workers: int = typer.Option(
-        4, "--workers", "-w", help="Number of threads for image decoding and flipping.", min=1
-    ),
-    conf: float = typer.Option(
-        0.001, "--conf", "-c", help="Candidate confidence floor.", min=0.0, max=1.0
-    ),
-    iou: float = typer.Option(
-        0.5, "--iou", help="NMS IoU threshold for merging the views.", min=0.0, max=1.0
-    ),
-    fallback_threshold: float = typer.Option(
-        0.4,
-        "--fallback-threshold",
-        help="Score threshold used for a size bin when its score histogram has no valley.",
-        min=0.0,
-        max=1.0,
-    ),
-    soft_weights: bool = typer.Option(
-        True,
-        "--soft-weights/--no-soft-weights",
-        help="Write threshold-aware per-box weights as a 6th label column.",
-    ),
-    size_bins: bool = typer.Option(
-        True,
-        "--size-bins/--no-size-bins",
-        help="Ground threshold per COCO size bin (off: one threshold for all boxes).",
-    ),
-    multi_view: bool = typer.Option(
-        True,
-        "--multi-view/--no-multi-view",
-        help="Aggregate the normal and horizontally flipped views (off: normal view only).",
-    ),
-    imgsz: int = typer.Option(640, "--imgsz", help="Teacher inference image size."),
-    input_scale_bins: bool = typer.Option(
-        True,
-        "--input-scale-bins/--no-input-scale-bins",
-        help="Take COCO size bins at the network input scale (off: in original image pixels).",
-    ),
-    device: Optional[str] = typer.Option(
-        None, "--device", "-d", help="PyTorch device identifier (e.g. 'cuda:0', 'cpu')."
-    ),
-) -> None:
-    """Run pseudo-label generation on an unannotated image dataset."""
-    generator = PseudoLabelGenerator(
-        teacher_model=model,
-        batch_size=batch_size,
-        half=half,
-        workers=workers,
-        conf=conf,
-        iou_threshold=iou,
-        fallback_threshold=fallback_threshold,
-        soft_weights=soft_weights,
-        size_bins=size_bins,
-        multi_view=multi_view,
-        imgsz=imgsz,
-        input_scale_bins=input_scale_bins,
-        device=device,
-    )
-    generator.generate(
-        images_dir=images,
-        labels_dir=labels,
-        max_images=max_images,
-        save_candidates_path=save_candidates_path,
-    )
-
-
-if __name__ == "__main__":
-    app()

@@ -17,7 +17,6 @@ from ssod.mean_teacher import (
     compute_batch_loss,
     configure_student_criterion,
     discover_coco_gt_path,
-    pl_teacher_due,
     split_batch,
     update_teacher_ema,
 )
@@ -303,20 +302,6 @@ def test_discover_coco_gt_prefers_dataset_annotations(tmp_path):
     yaml_path = tmp_path / "ucwd.yaml"
     yaml_path.write_text(f"path: {tmp_path / 'ucwd'}\ntrain: train/images\nval: val/images\n")
     assert discover_coco_gt_path(yaml_path) == tmp_path / "ucwd" / "val" / "annotations.json"
-
-
-class TestPseudoLabelTeacherRefresh:
-    """The pseudo-labelling Teacher snapshot is refreshed every k epochs, starting at the first."""
-
-    def test_every_epoch_by_default(self):
-        assert all(pl_teacher_due(epoch, 1) for epoch in range(10))
-
-    @pytest.mark.parametrize(
-        ("epochs", "k", "expected"),
-        [(10, 3, [0, 3, 6, 9]), (15, 8, [0, 8])],
-    )
-    def test_every_k_epochs(self, epochs, k, expected):
-        assert [e for e in range(epochs) if pl_teacher_due(e, k)] == expected
 
 
 def test_mean_teacher_config_initialization():
