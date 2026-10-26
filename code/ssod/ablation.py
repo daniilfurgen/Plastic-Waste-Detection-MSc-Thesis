@@ -26,6 +26,7 @@ Batches:
   fractions-loo          leave-one-out + cap 4800 at 10% of the labels x seeds 42-44 (runs/mean_teacher/ablation-fractions-loo)
   ucwd                   UCWD at imgsz 640: supervised warm-up on all labels; SSL vs. control on 25% (runs/mean_teacher/ablation-ucwd)
   online-caps            online SSGT, full pipeline at PL caps 2400/4800/9600 x seeds 42-44 (runs/mean_teacher/ablation-online-caps)
+  online-fractions       online SSGT at the 4800 cap: 10/25/50% labels vs. GT-only controls, plus the full-label control x seeds 42-44 (runs/mean_teacher/ablation-online-fractions)
 
 All batches now run the online pipeline (per-step pseudo-labels with EMA score histograms). Their
 results so far were produced by the offline per-epoch pipeline at git tag `offline-ssgt`; batches up
@@ -555,6 +556,51 @@ BATCHES["online-caps"] = Batch(
         f"cap-{cap}": ["--pl-images-per-epoch", str(cap), "--pl-soft-weights", "--ema-decay", "0.9996"]
         for cap in ONLINE_CAPS
     }),
+)
+
+# The 4,800 cap with step-matched GT-only controls, at full labels and at 10/25/50% of the labels
+# (reusing the `fractions` warm-ups), over seeds 42-44. In `online-caps` the best epoch followed the
+# number of pseudo-labelled images seen (~36-48k), which 15 epochs at 4,800 exceed (72k), so runs
+# that keep improving beyond that show up here. As in `fractions`, SSL runs repeat GT 1/fraction
+# times to keep the full-label GT:PL ratio; every unlabeled image of the cap enters an epoch, so
+# controls repeat GT to match 1 x GT + 4,800 samples per epoch (no GT tail).
+ONLINE_FRACTION_CAP = 4800
+ONLINE_FRACTION_SSL = [
+    "--pl-images-per-epoch", str(ONLINE_FRACTION_CAP), "--pl-soft-weights", "--ema-decay", "0.9996",
+]
+
+
+def online_gt_only(n_gt: int, ssl_gt_repeat: int = 1) -> list[str]:
+    """GT-only control step-matched to an online SSL run at the 4,800 cap."""
+    gt_repeat = matched_gt_repeat(n_gt, ssl_gt_repeat, pl_images=ONLINE_FRACTION_CAP, tail_ratio=0.0)
+    return ["--pl-images-per-epoch", "0", "--ema-decay", "0.9996", "--gt-repeat", str(gt_repeat)]
+
+
+_online_fraction_configs: dict[str, list[str]] = {"100pct-gt-only": online_gt_only(GT_TRAIN_IMAGES)}
+_online_fraction_warmup: dict[str, str] = {}
+for _pct in (10, 25, 50):
+    _ssl_repeat = round(100 / _pct)
+    _online_fraction_configs[f"{_pct}pct-ssl"] = [*ONLINE_FRACTION_SSL, "--gt-repeat", str(_ssl_repeat)]
+    _online_fraction_configs[f"{_pct}pct-gt-only"] = online_gt_only(
+        round(GT_TRAIN_IMAGES * _pct / 100), _ssl_repeat
+    )
+_online_fraction_runs = seeded(_online_fraction_configs)
+BATCHES["online-fractions"] = Batch(
+    project=Path("runs/mean_teacher/ablation-online-fractions"),
+    runs=_online_fraction_runs,
+    references={
+        f"100pct-ssl-seed{seed} (ref)": Path(f"runs/mean_teacher/ablation-online-caps/cap-4800-seed{seed}")
+        for seed in SEEDS
+    },
+    warmups={
+        f"{pct}pct-warmup": Warmup(fraction=pct / 100, epochs=warmup_epochs(pct / 100), root=FRACTIONS_PROJECT)
+        for pct in (10, 25, 50)
+    },
+    run_warmup={
+        run: f"{run.split('pct-')[0]}pct-warmup"
+        for run in _online_fraction_runs
+        if not run.startswith("100pct")
+    },
 )
 
 SUMMARY_FIELDS = [

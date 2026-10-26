@@ -720,6 +720,77 @@ The closest offline references are `cap-2400` against `loo-seeds/final` (same se
 to the 2,400 cap. The batch has 9 runs. A 9,600-frame epoch is about 4× longer than a 2,400 one,
 so expect roughly 8–9 h.
 
+Results are mAP50-95, mean ± std over seeds 42–44, baseline 0.430:
+
+| Configuration | Epoch 5 | Epoch 10 | Epoch 15 | Best (epochs) | Epochs 11–15 |
+|---|---|---|---|---|---|
+| online `cap-2400` | 0.4368 | 0.4390 | 0.4398 ± 0.0020 | 0.4401 (14, 14, 14) | 0.4398 |
+| online `cap-4800` | 0.4410 | 0.4404 | 0.4379 ± 0.0013 | 0.4423 (9, 6, 8) | 0.4387 |
+| online `cap-9600` | 0.4429 | 0.4401 | 0.4360 ± 0.0027 | 0.4431 (8, 5, 5) | 0.4378 |
+| offline `loo-seeds/final` | 0.4391 | 0.4417 | 0.4420 ± 0.0020 | 0.4424 | 0.4419 |
+| offline `loo-seeds/gt-only` | 0.4346 | 0.4371 | 0.4359 ± 0.0021 | 0.4375 | 0.4363 |
+
+- **Online 2,400 is the smoothest curve.** Its mean absolute change between epochs is 0.0007,
+  against 0.0010 for offline `final`. It is still rising at epoch 15, and it ends about 0.002 below
+  offline `final`, which is about one seed std.
+- **Larger caps rise faster, peak, then drift.** They lose 0.004–0.007 by epoch 15. Their peaks fall
+  after roughly the same number of pseudo-labelled images: about 36k for 4,800 and about 48k for
+  9,600. At 2,400, epoch 15 is also only 36k images, which is consistent with its best epoch
+  being the last one. The best epoch tracks how many pseudo-labelled images a run has seen, rather
+  than the epoch number.
+
+#### `online-fractions`: label fractions at the 4,800 cap
+
+Output: `runs/mean_teacher/ablation-online-fractions/`. Online SSL at the 4,800 cap and a
+step-matched GT-only control at 10, 25 and 50% of the labels, plus a full-label GT-only control,
+each over seeds 42–44. That is 21 runs, roughly 12–15 h; use `--only` to run a subset.
+
+- **Starting weights and repeats.** Each fraction starts from its existing warm-up in
+  `ablation-fractions` (nothing is retrained). As in `fractions`, SSL runs repeat GT 1/fraction
+  times (`--gt-repeat` 10, 4, 2), so GT keeps its full-label share of an epoch.
+- **Controls.** All 4,800 unlabeled images of the cap enter every epoch online. Each control
+  therefore repeats GT to match `n_GT × repeat + 4,800` samples per epoch with no GT tail:
+  `--gt-repeat` 50, 20, 10, and 5 at full labels.
+- **Why the 4,800 cap.** Fifteen epochs at 4,800 are 72k pseudo-labelled images. Fractions whose
+  best epoch comes after more images than the full-label runs need (36–48k) should therefore show
+  it. The full-label SSL runs are `online-caps/cap-4800-seed*`, listed as references in the
+  summary. The full-label control fills the step-matched control `online-caps` lacked for that cap.
+
+Results: mAP50-95, mean ± std over seeds 42–44. The full-label SSL row is `online-caps/cap-4800`.
+Seed-by-seed curves are aggregated by [`ablation_analysis.ipynb`](../ablation_analysis.ipynb) into
+`paper/exp-results/aggregated-fractions.csv`, and `online-caps` into `aggregated-caps.csv`.
+
+| Labels | Run | Epoch 0 | Epoch 5 | Epoch 10 | Epoch 15 | Best (epochs) | Epochs 11–15 | `mAP_s`, epoch 15 |
+|---|---|---|---|---|---|---|---|---|
+| 10% | SSL | 0.3411 | 0.3534 | 0.3574 | 0.3542 ± 0.0027 | 0.3583 (9, 8, 10) | 0.3557 ± 0.0018 | 0.3413 |
+| 10% | GT-only | 0.3411 | 0.3474 | 0.3412 | 0.3316 ± 0.0012 | 0.3475 (5, 5, 7) | 0.3360 ± 0.0010 | 0.3144 |
+| 25% | SSL | 0.3782 | 0.3942 | 0.3950 | 0.3910 ± 0.0019 | 0.3958 (9, 7, 10) | 0.3928 ± 0.0022 | 0.3553 |
+| 25% | GT-only | 0.3782 | 0.3814 | 0.3802 | 0.3749 ± 0.0010 | 0.3826 (10, 3, 8) | 0.3770 ± 0.0015 | 0.3365 |
+| 50% | SSL | 0.4122 | 0.4255 | 0.4257 | 0.4232 ± 0.0007 | 0.4267 (7, 9, 9) | 0.4242 ± 0.0009 | 0.3809 |
+| 50% | GT-only | 0.4121 | 0.4188 | 0.4151 | 0.4050 ± 0.0009 | 0.4197 (4, 6, 4) | 0.4098 ± 0.0005 | 0.3638 |
+| 100% | SSL | 0.4303 | 0.4410 | 0.4404 | 0.4379 ± 0.0016 | 0.4423 (9, 6, 8) | 0.4387 ± 0.0010 | 0.3956 |
+| 100% | GT-only | 0.4303 | 0.4384 | 0.4383 | 0.4317 ± 0.0025 | 0.4400 (9, 6, 9) | 0.4350 ± 0.0024 | 0.3888 |
+
+- **SSL beats its control at every fraction, by far more than seed noise.** At epoch 15 the gap is
+  +0.023 at 10%, +0.016 at 25%, +0.018 at 50% and +0.006 at full labels, against seed stds of
+  0.001–0.003. Over epochs 11–15 the gaps are +0.020, +0.016, +0.014 and +0.004. Small objects
+  gain the most: `mAP_s` rises by +0.027, +0.019, +0.017 and +0.007 at epoch 15.
+- **The gain comes mostly from SSL not degrading.** The GT-only controls peak early (mostly epochs 3–8 at
+  10–50%; one 25% seed at 10) and then fall. At 10% the control ends 0.010 below its own warm-up, which is how
+  overfitting the 120 repeated images looks. SSL runs keep a margin over the warm-up at every
+  fraction: +0.013 at 10%, +0.013 at 25%, +0.011 at 50% and +0.008 at full labels.
+- **No fraction improves beyond about 36–48k pseudo-labelled images.** The SSL best epochs are 7–10
+  at every fraction, i.e. 34–48k images at 4,800 per epoch, the same range as the full-label caps
+  in `online-caps`. Every SSL curve then drifts down slightly (0.003–0.005 from its best by epoch 15). So the
+  4,800 cap gives fewer labels no extra headroom; reporting the best epoch, or a run length that
+  ends near 40k pseudo-labelled images, captures the gain.
+- **At full labels the margin is small.** The best epochs differ by only 0.002 (0.4423 against
+  0.4400). The step-matched control explains most of the SSL gain over the warm-up there, unlike
+  at 10–50%.
+- **Fewer labels give fewer pseudo boxes.** At epoch 15 the 4,800-frame sample yields about 5,200
+  pseudo boxes at 10–25% of the labels, 6,000 at 50% and 6,900 at full labels, as the weaker
+  Teachers pass fewer candidates.
+
 ## Exporting results for the thesis
 
 ```bash
