@@ -1776,7 +1776,8 @@ def main(
         "--pl-images-per-epoch",
         help=(
             "Train on a fresh uniform random sample of this many unlabeled images each epoch, "
-            "pseudo-labelled online; the initial score histograms use a sample of the same size "
+            "pseudo-labelled online; the initial score histograms use a sample of the same size. "
+            "A count above the pool size repeats the pool (each image k or k+1 times) "
             "(0 disables pseudo-labels: supervised fine-tuning control; -1 uses the whole pool)."
         ),
         min=-1,

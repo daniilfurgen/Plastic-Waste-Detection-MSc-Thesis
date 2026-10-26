@@ -603,10 +603,15 @@ def sample_image_files(
     """
     Uniform random sample (without replacement, original order kept) of `sample_images` files.
     Sampling whole images uniformly keeps the pseudo-box size-bin distribution unbiased.
-    Returns all files when `sample_images` is None or not smaller than the pool.
+    A sample larger than the pool takes whole passes over it plus a uniform remainder, so every
+    image appears k or k + 1 times. Returns all files when `sample_images` is None or not positive.
     """
-    if sample_images is None or not 0 < sample_images < len(image_files):
+    if sample_images is None or sample_images <= 0 or not image_files:
         return image_files
+    passes, remainder = divmod(sample_images, len(image_files))
     rng = np.random.default_rng(seed)
-    chosen = np.sort(rng.choice(len(image_files), size=sample_images, replace=False))
+    chosen = np.sort(np.concatenate([
+        np.repeat(np.arange(len(image_files)), passes),
+        rng.choice(len(image_files), size=remainder, replace=False),
+    ]))
     return [image_files[i] for i in chosen]

@@ -6,6 +6,7 @@ weights, multi-view candidates, per-step labelling, the histogram log and image 
 from __future__ import annotations
 
 import csv
+from collections import Counter
 from pathlib import Path
 from unittest.mock import patch
 
@@ -385,6 +386,14 @@ class TestSampleImageFiles:
         assert first != second
         assert first == sorted(first)
 
-    @pytest.mark.parametrize("limit", [None, 5000])
+    @pytest.mark.parametrize("limit", [None, -1, 0, 1000])
     def test_no_sampling_returns_all(self, files, limit):
         assert sample_image_files(files, limit, seed=0) == files
+
+    def test_larger_than_pool_repeats_evenly(self, files):
+        sample = sample_image_files(files, 2400, seed=0)
+        assert len(sample) == 2400
+        assert sample == sorted(sample)
+        repeats = Counter(sample)
+        assert set(files) == set(repeats)
+        assert sorted(Counter(repeats.values()).items()) == [(2, 600), (3, 400)]

@@ -791,6 +791,28 @@ Seed-by-seed curves are aggregated by [`ablation_analysis.ipynb`](../ablation_an
   pseudo boxes at 10–25% of the labels, 6,000 at 50% and 6,900 at full labels, as the weaker
   Teachers pass fewer candidates.
 
+#### `ucwd-online-fractions`: label fractions on UCWD at the 4,800 cap
+
+Output: `runs/mean_teacher/ablation-ucwd-online-fractions/`. This is `online-fractions` on UCWD
+(imgsz 640): online SSL at the 4,800 cap and a step-matched GT-only control at 10, 25 and 50% of
+the labels, each over seeds 42–44. That is 18 runs plus two new warm-ups; use `--only` to run a subset.
+
+- **Warm-ups.** They are shared with `ucwd` in `runs/mean_teacher/ablation-ucwd/`, and the
+  existing `25pct-warmup` is reused. The 10% and 50% warm-ups are trained first, with the same
+  step budget as the full-label warm-up (480 and 100 epochs). The subsets are nested (10% ⊂ 25% ⊂ 50%).
+  The 25% split matches the one `ucwd` used.
+- **Unlabeled pool.** It is the rest of the train split, symlinked into
+  `data/ucwd/unlabeled_{90,75,50}pct/` (2,764, 2,303 and 1,536 images). That is smaller than the
+  cap, so each epoch's sample repeats the pool: whole passes plus a uniform remainder, so every
+  image enters 1–3 times per epoch, each time with fresh augmentations and fresh pseudo-labels. Every fraction
+  therefore sees 4,800 pseudo-labelled samples per epoch (72k over 15 epochs), as on FloW, but
+  from 1,536–2,764 distinct images.
+- **Repeats.** SSL runs repeat GT 1/fraction times (`--gt-repeat` 10, 4, 2), so every fraction
+  trains on about 3,071 GT + 4,800 PL samples per epoch and differs only in label (and pool)
+  diversity. Controls match those epochs with `--gt-repeat` 26, 10 and 5.
+- **Full labels.** There is no unlabeled pool at 100%, so the full-label point is the supervised
+  warm-up (`100pct-warmup`), listed as a reference in the summary.
+
 ## Exporting results for the thesis
 
 ```bash
@@ -830,7 +852,7 @@ supervised starting point.
 
 | Flag | Meaning |
 |---|---|
-| `--pl-images-per-epoch N` | Train on a fresh random sample of N unlabeled frames each epoch (default 2,400) instead of all ~27k; the initial score histograms use a sample of the same size. Sampling whole images keeps the small/medium/large box mix unchanged. `0` disables pseudo-labels (GT-only control); `-1` uses the whole pool. |
+| `--pl-images-per-epoch N` | Train on a fresh random sample of N unlabeled frames each epoch (default 2,400) instead of all ~27k; the initial score histograms use a sample of the same size. Sampling whole images keeps the small/medium/large box mix unchanged. N above the pool size repeats the pool (each image k or k + 1 times). `0` disables pseudo-labels (GT-only control); `-1` uses the whole pool. |
 | `--gt-repeat k` | Repeat the GT part of each epoch (except the GT tail, if any) k times. |
 | `--gt-yaml` | Ground-truth dataset YAML (used for the label-fraction subsets). |
 | `--model` | Architecture name recorded with the run; the weights themselves come from `--warmup-weights`. |

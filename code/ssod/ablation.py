@@ -27,6 +27,7 @@ Batches:
   ucwd                   UCWD at imgsz 640: supervised warm-up on all labels; SSL vs. control on 25% (runs/mean_teacher/ablation-ucwd)
   online-caps            online SSGT, full pipeline at PL caps 2400/4800/9600 x seeds 42-44 (runs/mean_teacher/ablation-online-caps)
   online-fractions       online SSGT at the 4800 cap: 10/25/50% labels vs. GT-only controls, plus the full-label control x seeds 42-44 (runs/mean_teacher/ablation-online-fractions)
+  ucwd-online-fractions  online-fractions on UCWD, the rest of the train split repeated to the 4800 cap (runs/mean_teacher/ablation-ucwd-online-fractions)
 
 All batches now run the online pipeline (per-step pseudo-labels with EMA score histograms). Their
 results so far were produced by the offline per-epoch pipeline at git tag `offline-ssgt`; batches up
@@ -601,6 +602,39 @@ BATCHES["online-fractions"] = Batch(
         for run in _online_fraction_runs
         if not run.startswith("100pct")
     },
+)
+
+# `online-fractions` on UCWD: 10/25/50% of the labels at the 4,800 cap vs. step-matched GT-only
+# controls, over seeds 42-44, with the rest of the train split as the unlabeled pool. That pool
+# (2,764/2,303/1,536 images) is smaller than the cap, so each epoch repeats it to 4,800 images (each
+# image 1-3 times, fresh augmentations each time). SSL runs repeat GT 1/fraction times, so every
+# fraction trains on ~3,071 GT + 4,800 PL samples per epoch and differs only in label diversity.
+# Warm-ups are shared with `ucwd` (25% is reused); there is no pool at 100% labels, so the
+# full-label point is the supervised warm-up.
+UCWD_FRACTIONS = (10, 25, 50)
+_ucwd_online_configs: dict[str, list[str]] = {}
+for _pct in UCWD_FRACTIONS:
+    _ssl_repeat = round(100 / _pct)
+    _ucwd_online_configs[f"{_pct}pct-ssl"] = [*ONLINE_FRACTION_SSL, "--gt-repeat", str(_ssl_repeat)]
+    _ucwd_online_configs[f"{_pct}pct-gt-only"] = online_gt_only(
+        round(UCWD_TRAIN_IMAGES * _pct / 100), _ssl_repeat
+    )
+_ucwd_online_runs = seeded(_ucwd_online_configs)
+BATCHES["ucwd-online-fractions"] = Batch(
+    project=Path("runs/mean_teacher/ablation-ucwd-online-fractions"),
+    runs=_ucwd_online_runs,
+    references={"100pct-supervised (warm-up)": UCWD_PROJECT / "100pct-warmup"},
+    warmups={
+        f"{pct}pct-warmup": Warmup(
+            fraction=pct / 100,
+            epochs=warmup_epochs(pct / 100, UCWD_TRAIN_IMAGES, UCWD_WARMUP_STEPS),
+            root=UCWD_PROJECT,
+            data=UCWD_DATA_YAML,
+        )
+        for pct in UCWD_FRACTIONS
+    },
+    run_warmup={run: f"{run.split('pct-')[0]}pct-warmup" for run in _ucwd_online_runs},
+    unlabeled_rest=True,
 )
 
 SUMMARY_FIELDS = [
