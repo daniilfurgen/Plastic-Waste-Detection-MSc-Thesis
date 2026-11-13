@@ -120,12 +120,32 @@
     counter(figure.where(kind: image)).update(0)
     counter(figure.where(kind: table)).update(0)
     counter(figure.where(kind: raw)).update(0)
+    counter(figure.where(kind: "algorithm")).update(0)
   }
   let prepend-with-section(numbering: "1.1", ..n) = context {
     let sec = counter(heading).get().first()
     std.numbering(numbering, sec, ..n)
   }
   set figure(numbering: prepend-with-section.with(numbering: "1.1"))
+
+  // Посилання на рисунки, таблиці, алгоритми та формули. Номер розділу в `prepend-with-section`
+  // береться з контексту, тобто з місця посилання, а не з місця об'єкта. Тому посилання з іншого
+  // розділу отримувало б хибний префікс. Тут номер збирається за місцем самого об'єкта.
+  show ref: it => {
+    let el = it.element
+    if el == none { return it }
+    let is-figure = el.func() == figure
+    if not is-figure and el.func() != math.equation { return it }
+    context {
+      let loc = el.location()
+      let sec = counter(heading).at(loc).first()
+      let object-counter = if is-figure { counter(figure.where(kind: el.kind)) } else { counter(math.equation) }
+      let format = if is-figure { "1.1" } else { "(1.1)" }
+      let number = std.numbering(format, sec, ..object-counter.at(loc))
+      let supplement = if it.supplement == auto { el.supplement } else { it.supplement }
+      link(loc, if supplement == none or supplement == [] { number } else { [#supplement~#number] })
+    }
+  }
 
   // Налаштування відступів рисунтів
   show figure: body => {
