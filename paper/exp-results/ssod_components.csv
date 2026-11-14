@@ -1,0 +1,6 @@
+run,warmup,pl_cap,soft_weights,ema,variant,epochs,supervised,final,late_mean,best,best_epoch,epoch_min,delta_final,delta_late_mean
+final,tuned,2400,1,0.9996,"",15,0.4483,0.4411,0.4462,0.4585,3,1.61,0.0,0.0
+no-cap,tuned,27302,1,0.9996,"",15,0.4482,0.4115,0.4136,0.4444,1,10.88,-0.0296,-0.0326
+no-soft-weights,tuned,2400,0,0.9996,"",15,0.4482,0.4473,0.4525,0.4614,7,1.55,0.0062,0.0063
+fast-ema,tuned,2400,1,0.999,"",15,0.4482,0.431,0.4329,0.4592,1,1.63,-0.0101,-0.0133
+gt-only,tuned,0,0,0.9996,"",15,0.4483,0.453,0.4564,0.4595,6,0.96,0.0119,0.0102
