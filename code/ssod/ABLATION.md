@@ -50,7 +50,7 @@ Based on the batches below, the trainer's defaults are now:
 
 | Setting | Default | Why |
 |---|---|---|
-| `--pl-images-per-epoch` | 2400 | The optimum for YOLO26 at full labels: 27k → 4,800 → 2,400 frames kept improving, and 1,200 loses the gain over the GT-only control (`architectures`). With 10–25% of the labels, 4,800 does slightly better (`fractions-2400`); that's left as future work. |
+| `--pl-images-per-epoch` | 4800 | Used by every online batch the thesis results rest on (`online-fractions`, `ucwd-online-fractions`, `arch-online`). With 10–25% of the labels 4,800 does better than 2,400 (`fractions-2400`, `fractions-loo`). At full labels the offline batches found 2,400 slightly better (`architectures`), and `online-caps` shows the cap mainly changes the dynamics, not the final value. The offline batches below pin their own cap explicitly. |
 | `--pl-soft-weights` | on | Part of every best configuration since `pool`. |
 | `--ema-decay` | 0.9996 | Removes most of the late drift; 0.9998 adds nothing. |
 | Input-scale size bins | always | Size bins at the network input scale, so they mean the same on any image resolution (needed for UCWD, whose images range from 1200×800 to 5472×3648). Adopted on principle, not from an ablation; the batches up to `fractions-2400` ran with original-pixel bins (`--no-pl-input-scale-bins`, removed with online SSGT). |
@@ -353,7 +353,7 @@ Both batches share the same warm-ups, so their SSL runs are directly comparable:
   higher but drifts like the 100% runs. At 100% the drift wins outright.
 - **Not pursued in this thesis.** Choosing the cap per fraction on the val split would be optimistic,
   because the same split is used for reporting. Testing it properly needs more points (e.g. 10% at
-  9,600) and seeds. The main results use the fixed 2,400 default, and this table is reported as a
+  9,600) and seeds. The main results use the fixed 4,800 default (set after these batches), and this table is reported as a
   sensitivity analysis. How the optimal pseudo-data volume depends on label budget and Teacher
   strength is left for future work.
 
@@ -852,7 +852,7 @@ supervised starting point.
 
 | Flag | Meaning |
 |---|---|
-| `--pl-images-per-epoch N` | Train on a fresh random sample of N unlabeled frames each epoch (default 2,400) instead of all ~27k; the initial score histograms use a sample of the same size. Sampling whole images keeps the small/medium/large box mix unchanged. N above the pool size repeats the pool (each image k or k + 1 times). `0` disables pseudo-labels (GT-only control); `-1` uses the whole pool. |
+| `--pl-images-per-epoch N` | Train on a fresh random sample of N unlabeled frames each epoch (default 4,800) instead of all ~27k; the initial score histograms use a sample of the same size. Sampling whole images keeps the small/medium/large box mix unchanged. N above the pool size repeats the pool (each image k or k + 1 times). `0` disables pseudo-labels (GT-only control); `-1` uses the whole pool. |
 | `--gt-repeat k` | Repeat the GT part of each epoch (except the GT tail, if any) k times. |
 | `--gt-yaml` | Ground-truth dataset YAML (used for the label-fraction subsets). |
 | `--model` | Architecture name recorded with the run; the weights themselves come from `--warmup-weights`. |

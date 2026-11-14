@@ -274,7 +274,7 @@ class MeanTeacherConfig:
     pl_strong_aug: bool = False  # strong Student augmentation on pseudo-labeled images
     # Fresh uniform unlabeled image sample per epoch (also the size of the initial histogram
     # sample); None (or negative) = whole pool, 0 = none (GT-only control)
-    pl_images_per_epoch: int | None = 2400
+    pl_images_per_epoch: int | None = 4800
     pl_soft_weights: bool = True  # threshold-aware per-box PL loss weights
     pl_cls_only: bool = False  # pseudo boxes train classification only (no box/DFL regression)
     pl_size_bins: bool = True  # ground threshold per COCO size bin (False: one for all boxes)
@@ -1772,7 +1772,7 @@ def main(
         help="Strong Student augmentation (HSV, blur, erasing) on pseudo-labeled images.",
     ),
     pl_images_per_epoch: int = typer.Option(
-        2400,
+        4800,
         "--pl-images-per-epoch",
         help=(
             "Train on a fresh uniform random sample of this many unlabeled images each epoch, "

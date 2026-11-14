@@ -113,11 +113,11 @@ class TestMeanTeacherDefaults:
 
     def test_adopted_defaults(self, invoke_cli, tmp_path):
         cfg = MeanTeacherConfig(runs_dir=tmp_path)
-        assert cfg.pl_images_per_epoch == 2400
+        assert cfg.pl_images_per_epoch == 4800
         assert cfg.ema_decay == pytest.approx(0.9996)
         assert cfg.pl_soft_weights
         cli_cfg = invoke_cli(["--project", str(tmp_path), "--name", "defaults"])
-        assert cli_cfg.pl_images_per_epoch == 2400
+        assert cli_cfg.pl_images_per_epoch == 4800
         assert cli_cfg.ema_decay == pytest.approx(0.9996)
         assert cli_cfg.pl_soft_weights
 
