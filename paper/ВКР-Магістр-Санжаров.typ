@@ -46,7 +46,7 @@
 #pagebreak()
 
 #bibliography(
-  "./sources.bib",
+  "./sources.yaml",
   title: [Список використаних джерел],
   style: "dstu-8302-2015.csl",
 )

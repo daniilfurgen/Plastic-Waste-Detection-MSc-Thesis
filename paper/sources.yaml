@@ -1,0 +1,1390 @@
+akyonSlicingAidedHyper2022:
+  type: article
+  title: Slicing Aided Hyper Inference and Fine-tuning for Small Object Detection
+  page-range: 966-970
+  url:
+    value: http://arxiv.org/abs/2202.06934v5
+    date: 2026-01-31
+  parent:
+    type: proceedings
+    title: 2022 IEEE International Conference on Image Processing (ICIP)
+  date: 2022-10-16
+  serial-number:
+    doi: 10.1109/ICIP46576.2022.9897990
+  author:
+    - Akyon, Fatih Cagatay
+    - Altinuc, Sinan Onur
+    - Temizel, Alptekin
+astralUv2026:
+  type: repository
+  title: uv
+  url:
+    value: https://docs.astral.sh/uv/
+    date: 2026-11-14
+  publisher: OpenAI
+  date: 2026
+  serial-number:
+    version: 0.11.7
+  author:
+    - Astral
+bishopPatternRecognitionMachine2006:
+  type: chapter
+  title: Pattern Recognition and Machine Learning
+  volume: 16
+  page-range: 140-155
+  parent:
+    type: book
+    title: Journal of Electronic Imaging
+  date: 2006-01-01
+  serial-number:
+    doi: 10.1117/1.2819119
+  author:
+    - Bishop, Christopher
+carionEndtoEndObjectDetection2020:
+  type: article
+  title: End-to-End Object Detection with Transformers
+  url:
+    value: http://arxiv.org/abs/2005.12872v3
+    date: 2026-10-06
+  parent:
+    type: periodical
+    title: arXiv
+  date: 2020-05-28
+  serial-number:
+    doi: 10.48550/arXiv.2005.12872
+  author:
+    - Carion, Nicolas
+    - Massa, Francisco
+    - Synnaeve, Gabriel
+    - Usunier, Nicolas
+    - Kirillov, Alexander
+    - Zagoruyko, Sergey
+chengFloWDatasetBenchmark2021:
+  type: article
+  title: 'FloW: A Dataset and Benchmark for Floating Waste Detection in Inland Waters'
+  language: en
+  page-range: 10933-10942
+  url:
+    value: https://ieeexplore.ieee.org/document/9710581/
+    date: 2025-11-25
+  parent:
+    type: proceedings
+    title: IEEE/CVF International Conference on Computer Vision (ICCV)
+    location: Montreal, QC, Canada
+  date: 2021-10
+  serial-number:
+    doi: 10.1109/ICCV48922.2021.01077
+    isbn: 978-1-6654-2812-5
+  author:
+    - Cheng, Yuwei
+    - Zhu, Jiannan
+    - Jiang, Mengxin
+    - Fu, Jie
+    - Pang, Changsong
+    - Wang, Peidong
+    - Sankaran, Kris
+    - Onabola, Olawale
+    - Liu, Yimin
+    - Liu, Dianbo
+    - Bengio, Yoshua
+chenSSDMSNImprovedMultiScale2019:
+  type: article
+  title: 'SSD-MSN: An Improved Multi-Scale Object Detection Network Based on SSD'
+  volume: 7
+  page-range: 80622-80632
+  url:
+    value: https://ieeexplore.ieee.org/document/8736726
+    date: 2026-03-13
+  parent:
+    type: periodical
+    title: IEEE Access
+  date: 2019
+  serial-number:
+    doi: 10.1109/ACCESS.2019.2923016
+    issn: 2169-3536
+  author:
+    - Chen, Zuge
+    - Wu, Kehe
+    - Li, Yuanbo
+    - Wang, Minjian
+    - Li, Wei
+cortesiMINIUAVBASEDLITTER2023:
+  type: article
+  title: Mini Uav-Based Litter Detection on River Banks
+  language: English
+  volume: X-4-W1-2022
+  page-range: 117-122
+  url:
+    value: https://isprs-annals.copernicus.org/articles/X-4-W1-2022/117/2023/
+    date: 2026-02-20
+  parent:
+    type: periodical
+    title: ISPRS Annals of the Photogrammetry, Remote Sensing and Spatial Information Sciences
+  date: 2023-01-13
+  serial-number:
+    doi: 10.5194/isprs-annals-X-4-W1-2022-117-2023
+    issn: 2194-9042
+  author:
+    - Cortesi, I.
+    - Mugnai, F.
+    - Angelini, R.
+    - Masiero, A.
+cottomLocaltoglobalEmissionsInventory2024:
+  type: article
+  title: A local-to-global emissions inventory of macroplastic pollution
+  language: en
+  volume: 633
+  issue: 8028
+  page-range: 101-108
+  url:
+    value: https://www.nature.com/articles/s41586-024-07758-6
+    date: 2026-10-06
+  parent:
+    type: periodical
+    title: Nature
+  date: 2024-09
+  serial-number:
+    doi: 10.1038/s41586-024-07758-6
+    issn: 1476-4687
+  author:
+    - Cottom, Joshua W.
+    - Cook, Ed
+    - Velis, Costas A.
+directorate-generalModellingMicroplasticfreeBlack2022:
+  type: web
+  title: 'Modelling a microplastic-free Black Sea: strategies to lower waste from feeder rivers'
+  language: en
+  url:
+    value: https://environment.ec.europa.eu/news/modelling-microplastic-free-black-sea-strategies-lower-waste-feeder-rivers-2022-11-16_en
+    date: 2025-11-20
+  publisher: European Commission DG Environment News Alert Service
+  date: 2022-11-16
+  author:
+    - Directorate-General for Environment
+doFalsePositivePatterns2025:
+  type: article
+  title: False Positive Patterns in UAV-Based Deep Learning Models for Coastal Debris Detection
+  language: en
+  volume: 13
+  issue: 10
+  url:
+    value: https://www.mdpi.com/2077-1312/13/10/1910
+    date: 2026-02-16
+  parent:
+    type: periodical
+    title: Journal of Marine Science and Engineering
+  date: 2025-10-04
+  serial-number:
+    doi: 10.3390/jmse13101910
+    issn: 2077-1312
+  author:
+    - Do, Ye-Been
+    - Kim, Bo-Ram
+    - Lee, Jeong-Seok
+    - Kim, Tae-Hoon
+everinghamPascalVisualObject2010:
+  type: article
+  title: The Pascal Visual Object Classes (VOC) challenge
+  volume: 88
+  page-range: 303-338
+  parent:
+    type: periodical
+    title: International Journal of Computer Vision
+  date: 2010-06-01
+  serial-number:
+    doi: 10.1007/s11263-009-0275-4
+  author:
+    - Everingham, Mark
+    - Van Gool, Luc
+    - Williams, Christopher
+    - Winn, John
+    - Zisserman, Andrew
+fahimDEtectionTRansformerDETR2024:
+  type: article
+  title: DEtection TRansformer (DETR) vs. YOLO for object detection.
+  language: en
+  url:
+    value: https://medium.com/@faheemrustamy/detection-transformer-detr-vs-yolo-for-object-detection-baeb3c50bc3
+    date: 2025-11-25
+  parent:
+    type: blog
+    title: Medium
+  date: 2024-03-18
+  author:
+    - Fahim, Rustamy
+fastapiTyper2026:
+  type: repository
+  title: Typer
+  url:
+    value: https://typer.tiangolo.com/
+    date: 2026-11-14
+  publisher: FastAPI
+  date: 2026-08-28
+  serial-number:
+    version: 0.27.2
+fengTOODTaskalignedOnestage2021:
+  type: article
+  title: 'TOOD: Task-aligned One-stage Object Detection'
+  url:
+    value: http://arxiv.org/abs/2108.07755v3
+    date: 2026-03-13
+  parent:
+    type: periodical
+    title: arXiv
+  date: 2021-08-28
+  serial-number:
+    doi: 10.48550/arXiv.2108.07755
+  author:
+    - Feng, Chengjian
+    - Zhong, Yujie
+    - Gao, Yu
+    - Scott, Matthew R.
+    - Huang, Weilin
+geyerProductionUseFate2017:
+  type: article
+  title: Production, use, and fate of all plastics ever made
+  volume: 3
+  issue: 7
+  page-range: e1700782
+  url:
+    value: https://www.science.org/doi/10.1126/sciadv.1700782
+    date: 2026-10-06
+  parent:
+    type: periodical
+    title: Science Advances
+  date: 2017-07-19
+  serial-number:
+    doi: 10.1126/sciadv.1700782
+  author:
+    - Geyer, Roland
+    - Jambeck, Jenna R.
+    - Law, Kara Lavender
+gillEdgeCompletesCloud2018:
+  type: article
+  title: 'The Edge Completes the Cloud: A Gartner Trend Insight Report'
+  language: en
+  issue: G00360847
+  url: https://emt.gartnerweb.com/ngw/globalassets/en/doc/documents/3889058-the-edge-completes-the-cloud-a-gartner-trend-insight-report.pdf
+  parent:
+    type: periodical
+    title: Gartner
+  date: 2018-09-14
+  author:
+    - Gill, Bob
+    - Smith, David
+girshickFastRCNN2015:
+  type: article
+  title: Fast R-CNN
+  url:
+    value: http://arxiv.org/abs/1504.08083
+    date: 2026-10-06
+  parent:
+    type: periodical
+    title: arXiv
+  date: 2015-09-27
+  serial-number:
+    doi: 10.48550/arXiv.1504.08083
+  author:
+    - Girshick, Ross
+girshickRichFeatureHierarchies2014:
+  type: article
+  title: Rich feature hierarchies for accurate object detection and semantic segmentation
+  url:
+    value: http://arxiv.org/abs/1311.2524v5
+    date: 2026-10-06
+  parent:
+    type: periodical
+    title: arXiv
+  date: 2014-10-22
+  serial-number:
+    doi: 10.48550/arXiv.1311.2524
+  author:
+    - Girshick, Ross
+    - Donahue, Jeff
+    - Darrell, Trevor
+    - Malik, Jitendra
+gonzalez-fernandezFloatingMacrolitterLeaked2021:
+  type: article
+  title: Floating macrolitter leaked from Europe into the ocean
+  language: en
+  volume: 4
+  issue: 6
+  page-range: 474-483
+  url:
+    value: https://www.nature.com/articles/s41893-021-00722-6
+    date: 2026-10-06
+  parent:
+    type: periodical
+    title: Nature Sustainability
+  date: 2021-06
+  serial-number:
+    doi: 10.1038/s41893-021-00722-6
+    issn: 2398-9629
+  author:
+    - González-Fernández, Daniel
+    - Cózar, Andrés
+    - Hanke, Georg
+    - Viejo, Josué
+    - Morales-Caselles, Carmen
+    - Bakiu, Rigers
+    - Barceló, Damià
+    - Bessa, Filipa
+    - Bruge, Antoine
+    - Cabrera, María
+    - Castro-Jiménez, Javier
+    - Constant, Mel
+    - Crosti, Roberto
+    - Galletti, Yuri
+    - Kideys, Ahmet E.
+    - Machitadze, Nino
+    - Pereira de Brito, Joana
+    - Pogojeva, Maria
+    - Ratola, Nuno
+    - Rigueira, Júlia
+    - Rojo-Nieto, Elisa
+    - Savenko, Oksana
+    - Schöneich-Argent, Rosanna I.
+    - Siedlewicz, Grzegorz
+    - Suaria, Giuseppe
+    - Tourgeli, Myrto
+grigorovskiyVprovadzhennyaSistemiReciklingu2026:
+  type: report
+  title: 'Впровадження системи рециклінгу та повторного використання відходів від руйнувань в Україні: підсумковий звіт за результатами та рекомендаціями попереднього техніко-економічного дослідження'
+  language: uk
+  page-range: 33
+  url:
+    value: https://www.undp.org/ukraine/publications/study-debris-recycling-and-reuse-in-ukraine
+    date: 2026-10-08
+  publisher:
+    name: ПРООН в Україні
+    location: Київ
+  date: 2026-06
+  author:
+    - Григоровський, Петро
+    - Осипчук, Анастасія
+    - Синько, Дмитро
+    - Червяков, Юрій
+habashRecentRealTimeAerial2025:
+  type: article
+  title: 'Recent Real-Time Aerial Object Detection Approaches, Performance, Optimization, and Efficient Design Trends for Onboard Performance: A Survey'
+  volume: 25
+  issue: 24
+  page-range: 7563
+  url:
+    value: https://pmc.ncbi.nlm.nih.gov/articles/PMC12736610/
+    date: 2026-03-17
+  parent:
+    type: periodical
+    title: Sensors (Basel, Switzerland)
+  date: 2025-12-12
+  serial-number:
+    doi: 10.3390/s25247563
+    issn: 1424-8220
+    pmid: '41471559'
+    pmcid: PMC12736610
+  author:
+    - Habash, Nadin
+    - Alqumsan, Ahmad Abu
+    - Zhou, Tao
+hatamzadehkhanghahiUnifiedCoastalWaste2026:
+  type: misc
+  title: 'Unified Coastal Waste Dataset (UCWD): UAV Imagery with YOLO and COCO Annotations for Geospatial Analytics'
+  language: eng
+  url:
+    value: https://zenodo.org/records/20630252
+    date: 2026-10-08
+  publisher: Zenodo
+  date: 2026-06-10
+  serial-number:
+    doi: 10.5281/zenodo.20630252
+  author:
+    - Hatamzadeh khanghahi, Hesam
+huSqueezeandExcitationNetworks2019:
+  type: article
+  title: Squeeze-and-Excitation Networks
+  url:
+    value: http://arxiv.org/abs/1709.01507
+    date: 2026-10-06
+  parent:
+    type: periodical
+    title: arXiv
+  date: 2019-05-16
+  serial-number:
+    doi: 10.48550/arXiv.1709.01507
+  author:
+    - Hu, Jie
+    - Shen, Li
+    - Albanie, Samuel
+    - Sun, Gang
+    - Wu, Enhua
+iemelyanovOsoblivostiRozpodiluMakro2025:
+  type: article
+  title: Особливості розподілу макро- та мікропластику в межах пляжевих зон внутрішньоконтинентальних морів (на прикладі пляжевої зони м. Южне, україна)
+  language: uk
+  volume: 1
+  issue: 104
+  page-range: 86-97
+  url:
+    value: https://geology.bulletin.knu.ua/article/view/2534
+    date: 2025-11-20
+  parent:
+    type: periodical
+    title: Вісник Київського національного університету імені Тараса Шевченка. Геологія
+  date: 2025-01-16
+  serial-number:
+    doi: 10.17721/1728-2713.104.11
+    issn: 2079-9063
+  author:
+    - Ємельянов, Володимир
+    - Наседкін, Євген
+    - Іванік, Oлена
+    - Куковська, Тамара
+    - Юхимчук, Володимир
+    - Митрофанова, Олександра
+jackMultiResolutionUAVRemote2025:
+  type: article
+  title: Multi-Resolution UAV Remote Sensing for Anthropogenic Debris Detection in Complex River Environments
+  language: en
+  volume: 17
+  issue: 13
+  page-range: 2172
+  url:
+    value: https://www.mdpi.com/2072-4292/17/13/2172
+    date: 2025-11-25
+  parent:
+    type: periodical
+    title: Remote Sensing
+  date: 2025-06-25
+  serial-number:
+    doi: 10.3390/rs17132172
+    issn: 2072-4292
+  author:
+    - Jack, Peaceibisia
+    - Biggs, Trent
+    - Sousa, Daniel
+    - Coulter, Lloyd
+    - Hutmacher, Sarah
+    - McMillan, Hilary
+jambeckPlasticWasteInputs2015b:
+  type: article
+  title: Plastic waste inputs from land into the ocean
+  language: en
+  volume: 347
+  issue: 6223
+  page-range: 768-771
+  url:
+    value: https://www.science.org/doi/10.1126/science.1260352
+    date: 2026-10-06
+  parent:
+    type: periodical
+    title: Science
+  date: 2015-02-13
+  serial-number:
+    doi: 10.1126/science.1260352
+    issn: 0036-8075, 1095-9203
+  author:
+    - Jambeck, Jenna R.
+    - Geyer, Roland
+    - Wilcox, Chris
+    - Siegler, Theodore R.
+    - Perryman, Miriam
+    - Andrady, Anthony
+    - Narayan, Ramani
+    - Law, Kara Lavender
+jiaSemisupervisedLearningbasedFramework2025:
+  type: article
+  title: A semi-supervised learning-based framework for quantifying litter fluxes in river systems
+  page-range: 124833
+  parent:
+    type: periodical
+    title: Water Research
+  date: 2025-10-27
+  serial-number:
+    doi: 10.1016/j.watres.2025.124833
+  author:
+    - Jia, Tianlong
+    - Taormina, Riccardo
+    - de vries, Rinze
+    - Kapelan, Zoran
+    - van Emmerik, Tim
+    - Vriend, Paul
+    - Okkerman, Imke
+jocherUltralyticsYOLO2023:
+  type: repository
+  title: Ultralytics YOLO
+  url:
+    value: https://github.com/ultralytics/ultralytics
+    date: 2026-02-10
+  publisher: Ultralytics
+  date: 2023-01
+  serial-number:
+    version: 8.0.0
+  author:
+    - Jocher, Glenn
+    - Qiu, Jing
+    - Chaurasia, Ayush
+khanghahiAutomatedPlasticWaste2025:
+  type: article
+  title: Automated Plastic Waste Detection on Coastal Areas Using UAVs and Deep Learning
+  date: 2025-05-14
+  author:
+    - Khanghahi, Hesam
+    - Satoglu, Sule
+kisantalAugmentationSmallObject2019:
+  type: article
+  title: Augmentation for small object detection
+  url:
+    value: http://arxiv.org/abs/1902.07296v1
+    date: 2026-03-13
+  parent:
+    type: periodical
+    title: arXiv
+  date: 2019-02-19
+  serial-number:
+    doi: 10.48550/arXiv.1902.07296
+  author:
+    - Kisantal, Mate
+    - Wojna, Zbigniew
+    - Murawski, Jakub
+    - Naruniec, Jacek
+    - Cho, Kyunghyun
+leePseudoLabelSimpleEfficient2013:
+  type: article
+  title: 'Pseudo-Label : The Simple and Efficient Semi-Supervised Learning Method for Deep Neural Networks'
+  url: https://www.researchgate.net/publication/280581078_Pseudo-Label_The_Simple_and_Efficient_Semi-Supervised_Learning_Method_for_Deep_Neural_Networks
+  parent:
+    type: periodical
+    title: 'ICML 2013 Workshop : Challenges in Representation Learning (WREPL)'
+  date: 2013-07-10
+  author:
+    - Lee, Dong-Hyun
+liFloatingWasteDetectionMethodUnmanned2023:
+  type: article
+  title: A Floating-Waste-Detection Method for Unmanned Surface Vehicle Based on Feature Fusion and Enhancement
+  language: en
+  volume: 11
+  issue: 12
+  page-range: 2234
+  url:
+    value: https://www.mdpi.com/2077-1312/11/12/2234
+    date: 2025-11-25
+  parent:
+    type: periodical
+    title: Journal of Marine Science and Engineering
+  date: 2023-11-26
+  serial-number:
+    doi: 10.3390/jmse11122234
+    issn: 2077-1312
+  author:
+    - Li, Yong
+    - Wang, Ruichen
+    - Gao, Dongxu
+    - Liu, Zhiyong
+linFeaturePyramidNetworks2017:
+  type: article
+  title: Feature Pyramid Networks for Object Detection
+  url:
+    value: http://arxiv.org/abs/1612.03144
+    date: 2026-10-06
+  parent:
+    type: periodical
+    title: arXiv
+  date: 2017-04-19
+  serial-number:
+    doi: 10.48550/arXiv.1612.03144
+  author:
+    - Lin, Tsung-Yi
+    - Dollár, Piotr
+    - Girshick, Ross
+    - He, Kaiming
+    - Hariharan, Bharath
+    - Belongie, Serge
+linMicrosoftCOCOCommon2015:
+  type: article
+  title: 'Microsoft COCO: Common Objects in Context'
+  url:
+    value: http://arxiv.org/abs/1405.0312
+    date: 2026-10-06
+  parent:
+    type: periodical
+    title: arXiv
+  date: 2015-02-21
+  serial-number:
+    doi: 10.48550/arXiv.1405.0312
+  author:
+    - Lin, Tsung-Yi
+    - Maire, Michael
+    - Belongie, Serge
+    - Bourdev, Lubomir
+    - Girshick, Ross
+    - Hays, James
+    - Perona, Pietro
+    - Ramanan, Deva
+    - Zitnick, C. Lawrence
+    - Dollár, Piotr
+liuUnbiasedTeacherSemiSupervised2021:
+  type: article
+  title: Unbiased Teacher for Semi-Supervised Object Detection
+  url:
+    value: http://arxiv.org/abs/2102.09480
+    date: 2026-10-09
+  parent:
+    type: periodical
+    title: arXiv
+  date: 2021-02-18
+  serial-number:
+    doi: 10.48550/arXiv.2102.09480
+  author:
+    - Liu, Yen-Cheng
+    - Ma, Chih-Yao
+    - He, Zijian
+    - Kuo, Chia-Wen
+    - Chen, Kan
+    - Zhang, Peizhao
+    - Wu, Bichen
+    - Kira, Zsolt
+    - Vajda, Peter
+mcilgormEconomicCostControl2011:
+  type: article
+  title: The economic cost and control of marine debris damage in the Asia-Pacific region
+  volume: 54
+  issue: 9
+  page-range: 643-651
+  url:
+    value: https://www.sciencedirect.com/science/article/pii/S0964569111000688
+    date: 2026-10-06
+  parent:
+    type: periodical
+    title: Ocean & Coastal Management
+  date: 2011-09-01
+  serial-number:
+    doi: 10.1016/j.ocecoaman.2011.05.007
+    issn: 0964-5691
+  author:
+    - McIlgorm, Alistair
+    - Campbell, Harry F.
+    - Rule, Michael J.
+meijerMore1000Rivers2021:
+  type: article
+  title: More than 1000 rivers account for 80% of global riverine plastic emissions into the ocean
+  volume: 7
+  issue: 18
+  page-range: eaaz5803
+  url:
+    value: https://www.science.org/doi/10.1126/sciadv.aaz5803
+    date: 2026-10-06
+  parent:
+    type: periodical
+    title: Science Advances
+  date: 2021-04-30
+  serial-number:
+    doi: 10.1126/sciadv.aaz5803
+  author:
+    - Meijer, Lourens J. J.
+    - van Emmerik, Tim
+    - van der Ent, Ruud
+    - Schmidt, Christian
+    - Lebreton, Laurent
+NVIDIAGeForceRTX2026:
+  type: web
+  title: NVIDIA GeForce RTX 4070 SUPER Specs
+  language: en
+  url:
+    value: https://www.techpowerup.com/gpu-specs/geforce-rtx-4070-super.c4186
+    date: 2026-11-14
+  parent:
+    type: web
+    title: TechPowerUp
+  date: 2026-11-14
+obss2021sahi:
+  type: repository
+  title: 'SAHI: A lightweight vision library for performing large scale object detection and instance segmentation'
+  url: https://doi.org/10.5281/zenodo.5718950
+  publisher: Zenodo
+  date: 2021-11
+  serial-number:
+    doi: 10.5281/zenodo.5718950
+  author:
+    - Akyon, Fatih Cagatay
+    - Cengiz, Cemil
+    - Altinuc, Sinan Onur
+    - Cavusoglu, Devrim
+    - Sahin, Kadir
+    - Eryuksel, Ogulcan
+okawachiImageAnalysisCoastal2024:
+  type: article
+  title: An Image Analysis of Coastal Debris Detection -Detection of microplastics using deep learning-
+  language: en
+  volume: 29
+  page-range: 453-456
+  url:
+    value: https://alife-robotics.co.jp/LP/2024/OS16-4.htm
+    date: 2026-03-17
+  parent:
+    type: periodical
+    title: Proceedings of International Conference on Artificial Life and Robotics
+  date: 2024-02-22
+  serial-number:
+    doi: 10.5954/ICAROB.2024.OS16-4
+    issn: 2188-7829
+  author:
+    - Okawachi, Yuto
+    - Ogawa, Shintaro
+    - Hayashi, Takamasa
+    - Tan, Chi Jie
+    - Titan, Janthori
+    - Hayashi, Eiji
+    - Tominaga, Ayumu
+    - Seino, Satoko
+Pycocotools2025:
+  type: repository
+  title: pycocotools
+  url:
+    value: https://pypi.org/project/pycocotools/
+    date: 2026-11-14
+  publisher: PyPI
+  date: 2025-12-15
+  serial-number:
+    version: 2.0.11
+  author:
+    - Yuxin Wu
+    - Ross Girshick
+PyTorch2026:
+  type: repository
+  title: PyTorch
+  url:
+    value: https://docs.pytorch.org/docs/stable/index.html
+    date: 2026-11-14
+  publisher: PyTorch Foundation
+  date: 2026-06-18
+  serial-number:
+    version: 2.12.1
+qiaoAnnotatedDatasetBenchmark2025:
+  type: article
+  title: An annotated Dataset and Benchmark for Detecting Floating Debris in Inland Waters
+  language: en
+  volume: 12
+  issue: 1
+  page-range: 385
+  url:
+    value: https://www.nature.com/articles/s41597-025-04594-9
+    date: 2026-10-06
+  parent:
+    type: periodical
+    title: Scientific Data
+  date: 2025-03-05
+  serial-number:
+    doi: 10.1038/s41597-025-04594-9
+    issn: 2052-4463
+  author:
+    - Qiao, Guangchao
+    - Yang, Mingxiang
+    - Wang, Hao
+radiosvobodaPriblizno1012Milyoniv2023:
+  type: article
+  title: Приблизно 10-12 мільйонів тонн сміття утворилося в Україні внаслідок війни – Міндовкілля
+  language: uk
+  url:
+    value: https://www.radiosvoboda.org/a/news-ukraina-viyna-smittia-dovkillia/32467305.html
+    date: 2025-11-25
+  parent:
+    type: newspaper
+    title: Радіо Свобода
+  date: 2023-06-20
+  author:
+    - Радіо Свобода
+redmonYouOnlyLook2016:
+  type: article
+  title: 'You Only Look Once: Unified, Real-Time Object Detection'
+  language: en
+  page-range: 779-788
+  url:
+    value: http://ieeexplore.ieee.org/document/7780460/
+    date: 2026-02-09
+  parent:
+    type: proceedings
+    title: 2016 IEEE Conference on Computer Vision and Pattern Recognition (CVPR)
+    location: Las Vegas, NV, USA
+  date: 2016-06
+  serial-number:
+    doi: 10.1109/CVPR.2016.91
+    isbn: 978-1-4673-8851-1
+  author:
+    - Redmon, Joseph
+    - Divvala, Santosh
+    - Girshick, Ross
+    - Farhadi, Ali
+renFasterRCNNRealTime2016:
+  type: article
+  title: 'Faster R-CNN: Towards Real-Time Object Detection with Region Proposal Networks'
+  url:
+    value: http://arxiv.org/abs/1506.01497v3
+    date: 2026-10-06
+  parent:
+    type: periodical
+    title: arXiv
+  date: 2016-01-06
+  serial-number:
+    doi: 10.48550/arXiv.1506.01497
+  author:
+    - Ren, Shaoqing
+    - He, Kaiming
+    - Girshick, Ross
+    - Sun, Jian
+robinsonRFDETRNeuralArchitecture2026:
+  type: article
+  title: 'RF-DETR: Neural Architecture Search for Real-Time Detection Transformers'
+  url:
+    value: http://arxiv.org/abs/2511.09554v2
+    date: 2026-03-23
+  parent:
+    type: periodical
+    title: arXiv
+  date: 2026-02-03
+  serial-number:
+    doi: 10.48550/arXiv.2511.09554
+  author:
+    - Robinson, Isaac
+    - Robicheaux, Peter
+    - Popov, Matvei
+    - Ramanan, Deva
+    - Peri, Neehar
+sanzharovMetodologiyaDetekciyiPlastikovih2026:
+  type: article
+  title: Методологія детекції пластикових відходів у водоймах з використанням нейронних мереж
+  parent:
+    type: conference
+    title: 'Міжнародна науково-практична конференція «Обробка даних: моделі, методи та технології» ОДММТ-2026'
+    location: Київ, Україна
+  date: 2026-05-29
+  author:
+    - Санжаров, Данііл
+    - Філімонова, Тетяна
+sapkotaYOLO26KeyArchitectural2026:
+  type: article
+  title: 'YOLO26: Key Architectural Enhancements and Performance Benchmarking for Real-Time Object Detection'
+  url:
+    value: http://arxiv.org/abs/2509.25164v5
+    date: 2026-03-23
+  parent:
+    type: periodical
+    title: arXiv
+  date: 2026-03-16
+  serial-number:
+    doi: 10.48550/arXiv.2509.25164
+  author:
+    - Sapkota, Ranjan
+    - Cheppally, Rahul Harsha
+    - Sharda, Ajay
+    - Karkee, Manoj
+shehzadiSemiSupervisedObjectDetection2026a:
+  type: article
+  title: 'Semi-Supervised Object Detection: A Survey on Progress from CNN to Transformer'
+  volume: 26
+  issue: 1
+  page-range: 310
+  url:
+    value: https://pmc.ncbi.nlm.nih.gov/articles/PMC12788260/
+    date: 2026-06-18
+  parent:
+    type: periodical
+    title: Sensors (Basel, Switzerland)
+  date: 2026-01-03
+  serial-number:
+    doi: 10.3390/s26010310
+    issn: 1424-8220
+    pmid: '41516746'
+    pmcid: PMC12788260
+  author:
+    - Shehzadi, Tahira
+    - Ifza, Ifza
+    - Liwicki, Marcus
+    - Stricker, Didier
+    - Afzal, Muhammad Zeshan
+sohnSimpleSemiSupervisedLearning2020:
+  type: article
+  title: A Simple Semi-Supervised Learning Framework for Object Detection
+  url:
+    value: http://arxiv.org/abs/2005.04757v2
+    date: 2026-06-18
+  parent:
+    type: periodical
+    title: arXiv
+  date: 2020-12-03
+  serial-number:
+    doi: 10.48550/arXiv.2005.04757
+  author:
+    - Sohn, Kihyuk
+    - Zhang, Zizhao
+    - Li, Chun-Liang
+    - Zhang, Han
+    - Lee, Chen-Yu
+    - Pfister, Tomas
+strokalMoreRiverPollution2023:
+  type: article
+  title: 'More river pollution from untreated urban waste due to the Russian-Ukrainian war: a perspective view'
+  language: en
+  volume: 20
+  issue: 1
+  url:
+    value: https://doi.org/10.1080/1943815X.2023.2281920
+    date: 2025-11-25
+  parent:
+    type: periodical
+    title: Journal of Integrative Environmental Sciences
+  date: 2023-12-31
+  serial-number:
+    doi: 10.1080/1943815X.2023.2281920
+    issn: 1943-815X
+  author:
+    - Strokal, Vita
+    - Kurovska, Anna
+    - Strokal, Maryna
+summerForeign2023:
+  type: misc
+  title: foreign
+  url:
+    value: https://universe.roboflow.com/summer-skt0e/foreign-f32bw
+    date: 2026-02-26
+  publisher: Roboflow
+  genre: Open Source Dataset
+  date: 2023-12
+  author:
+    - summer
+sumonFloatingWasteDetection2026:
+  type: article
+  title: 'Floating waste detection using deep learning: a comparative study of YOLO, RT-DETR, and faster R-CNN'
+  language: en
+  volume: 38
+  issue: 8
+  page-range: 293
+  url:
+    value: https://doi.org/10.1007/s00521-026-12051-w
+    date: 2026-10-06
+  parent:
+    type: periodical
+    title: Neural Computing and Applications
+  date: 2026-04-13
+  serial-number:
+    doi: 10.1007/s00521-026-12051-w
+    issn: 1433-3058
+  author:
+    - Sumon, Shaheenur Islam
+    - Chowdhury, Muhammad E. H.
+    - Chowdhury, Jawad-Ul Kabir
+    - Ashraf, Azad
+    - Kashem, Saad Bin Abul
+    - Majid, Molla E.
+    - Nashbat, Mohammad
+    - Khandakar, Amith
+    - Hasan-Zia, Mazhar
+    - Kunju, Ali K. Ansaruddin
+tarvainenMeanTeachersAre2017:
+  type: article
+  title: 'Mean teachers are better role models: Weight-averaged consistency targets improve semi-supervised deep learning results'
+  volume: 30
+  url:
+    value: https://proceedings.neurips.cc/paper/2017/hash/68053af2923e00204c3ca7c6a3150cf7-Abstract.html
+    date: 2026-10-09
+  parent:
+    type: proceedings
+    title: Advances in Neural Information Processing Systems
+  date: 2017
+  author:
+    - Tarvainen, Antti
+    - Valpola, Harri
+tripathiContextMattersRefining2016:
+  type: article
+  title: 'Context Matters: Refining Object Detection in Video with Recurrent Neural Networks'
+  url:
+    value: http://arxiv.org/abs/1607.04648v2
+    date: 2026-06-18
+  parent:
+    type: periodical
+    title: arXiv
+  date: 2016-07-19
+  serial-number:
+    doi: 10.48550/arXiv.1607.04648
+  author:
+    - Tripathi, Subarna
+    - Lipton, Zachary C.
+    - Belongie, Serge
+    - Nguyen, Truong
+unepAgeWasteTurning2024:
+  type: book
+  title: 'Beyond an age of waste: turning rubbish into a resource'
+  language: en
+  url:
+    value: https://wedocs.unep.org/20.500.11822/44939
+    date: 2025-11-25
+  publisher:
+    name: UNEP
+    location: Nairobi
+  date: 2024
+  serial-number:
+    doi: 10.59117/20.500.11822/44939
+    isbn: 978-92-807-4129-2
+  author:
+    - UNEP
+unepRapidEnvironmentalAssessment2023:
+  type: book
+  title: Rapid Environmental Assessment of Kakhovka Dam Breach Ukraine, 2023
+  language: en
+  url:
+    value: https://wedocs.unep.org/20.500.11822/43696
+    date: 2025-11-25
+  publisher:
+    name: UNEP
+  date: 2023-10
+  serial-number:
+    doi: 10.59117/20.500.11822/43696
+    isbn: 978-92-807-4074-5
+  author:
+    - UNEP
+vandeghenAdaptiveSelfTrainingObject2023:
+  type: article
+  title: Adaptive Self-Training for Object Detection
+  page-range: 914-923
+  url:
+    value: https://ieeexplore.ieee.org/document/10350457
+    date: 2026-09-14
+  parent:
+    type: proceedings
+    title: 2023 IEEE/CVF International Conference on Computer Vision Workshops (ICCVW)
+  date: 2023-10
+  serial-number:
+    doi: 10.1109/ICCVW60793.2023.00098
+    issn: 2473-9944
+  author:
+    - Vandeghen, Renaud
+    - Louppe, Gilles
+    - Van Droogenbroeck, Marc
+vanemmerikPlasticDebrisRivers2020:
+  type: article
+  title: Plastic debris in rivers
+  language: en
+  volume: 7
+  issue: 1
+  page-range: e1398
+  url:
+    value: https://onlinelibrary.wiley.com/doi/abs/10.1002/wat2.1398
+    date: 2026-10-06
+  parent:
+    type: periodical
+    title: WIREs Water
+  date: 2020
+  serial-number:
+    doi: 10.1002/wat2.1398
+    issn: 2049-1948
+  author:
+    - van Emmerik, Tim
+    - Schwarz, Anna
+vaswaniAttentionAllYou2023:
+  type: article
+  title: Attention Is All You Need
+  url:
+    value: http://arxiv.org/abs/1706.03762
+    date: 2026-10-06
+  parent:
+    type: periodical
+    title: arXiv
+  date: 2023-08-02
+  serial-number:
+    doi: 10.48550/arXiv.1706.03762
+  author:
+    - Vaswani, Ashish
+    - Shazeer, Noam
+    - Parmar, Niki
+    - Uszkoreit, Jakob
+    - Jones, Llion
+    - Gomez, Aidan N.
+    - Kaiser, Lukasz
+    - Polosukhin, Illia
+wangWaterPollution2022:
+  type: misc
+  title: WaterPollution
+  url:
+    value: https://aistudio.baidu.com/datasetdetail/138822
+    date: 2026-02-26
+  date: 2022-04-13
+  author:
+    - Wang, Yuelei
+wangYOLOv10RealTimeEndtoEnd2024:
+  type: article
+  title: 'YOLOv10: Real-Time End-to-End Object Detection'
+  url:
+    value: http://arxiv.org/abs/2405.14458
+    date: 2026-10-06
+  parent:
+    type: periodical
+    title: arXiv
+  date: 2024-10-30
+  serial-number:
+    doi: 10.48550/arXiv.2405.14458
+  author:
+    - Wang, Ao
+    - Chen, Hui
+    - Liu, Lihao
+    - Chen, Kai
+    - Lin, Zijia
+    - Han, Jungong
+    - Ding, Guiguang
+wooCBAMConvolutionalBlock2018:
+  type: article
+  title: 'CBAM: Convolutional Block Attention Module'
+  url:
+    value: http://arxiv.org/abs/1807.06521
+    date: 2026-10-06
+  parent:
+    type: periodical
+    title: arXiv
+  date: 2018-07-18
+  serial-number:
+    doi: 10.48550/arXiv.1807.06521
+  author:
+    - Woo, Sanghyun
+    - Park, Jongchan
+    - Lee, Joon-Young
+    - Kweon, In So
+xieSelftrainingNoisyStudent2019:
+  type: article
+  title: Self-training with Noisy Student improves ImageNet classification
+  language: en
+  url:
+    value: https://arxiv.org/abs/1911.04252
+    date: 2026-09-15
+  parent:
+    type: periodical
+    title: arXiv
+  date: 2019-11-11
+  serial-number:
+    doi: 10.48550/arXiv.1911.04252
+  author:
+    - Xie, Qizhe
+    - Luong, Minh-Thang
+    - Hovy, Eduard
+    - Le, Quoc V.
+xuEfficientTeacherSemiSupervised2023:
+  type: article
+  title: 'Efficient Teacher: Semi-Supervised Object Detection for YOLOv5'
+  url:
+    value: http://arxiv.org/abs/2302.07577
+    date: 2026-10-09
+  parent:
+    type: periodical
+    title: arXiv
+  date: 2023-03-14
+  serial-number:
+    doi: 10.48550/arXiv.2302.07577
+  author:
+    - Xu, Bowen
+    - Chen, Mingtao
+    - Guan, Wenlong
+    - Hu, Lulu
+yangInteractiveSelfTrainingMean2021:
+  type: article
+  title: Interactive Self-Training with Mean Teachers for Semi-supervised Object Detection
+  page-range: 5937-5946
+  url:
+    value: https://ieeexplore.ieee.org/document/9577846
+    date: 2026-10-12
+  parent:
+    type: proceedings
+    title: 2021 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)
+  date: 2021-06
+  serial-number:
+    doi: 10.1109/CVPR46437.2021.00588
+    issn: 2575-7075
+  author:
+    - Yang, Qize
+    - Wei, Xihan
+    - Wang, Biao
+    - Hua, Xian-Sheng
+    - Zhang, Lei
+yarahmadiMicroplasticsEnvironmentalEffects2024:
+  type: article
+  title: 'Microplastics and environmental effects: investigating the effects of microplastics on aquatic habitats and their impact on human health'
+  volume: 12
+  page-range: 1411389
+  url:
+    value: https://pmc.ncbi.nlm.nih.gov/articles/PMC11191580/
+    date: 2025-11-20
+  parent:
+    type: periodical
+    title: Frontiers in Public Health
+  date: 2024-06-06
+  serial-number:
+    doi: 10.3389/fpubh.2024.1411389
+    issn: 2296-2565
+    pmid: '38912266'
+    pmcid: PMC11191580
+  author:
+    - Yarahmadi, Aref
+    - Heidari, SeyedeMozhgan
+    - Sepahvand, Parisa
+    - Afkhami, Hamed
+    - Kheradjoo, Hadis
+yolo26_ultralytics:
+  type: repository
+  title: Ultralytics YOLO26
+  url:
+    value: https://github.com/ultralytics/ultralytics
+    date: 2026-03-27
+  publisher: Ultralytics
+  date: 2026
+  serial-number:
+    version: 26.0.0
+  author:
+    - Glenn Jocher
+    - Jing Qiu
+zhangAdaptiveSlicingAidedHyper2023:
+  type: article
+  title: Adaptive Slicing-Aided Hyper Inference for Small Object Detection in High-Resolution Remote Sensing Images
+  language: en
+  volume: 15
+  issue: 5
+  url:
+    value: https://www.mdpi.com/2072-4292/15/5/1249
+    date: 2026-03-17
+  parent:
+    type: periodical
+    title: Remote Sensing
+  date: 2023-02-24
+  serial-number:
+    doi: 10.3390/rs15051249
+    issn: 2072-4292
+  author:
+    - Zhang, Hao
+    - Hao, Chuanyan
+    - Song, Wanru
+    - Jiang, Bo
+    - Li, Baozhu
+zhangRethinkingScaleImbalance2023:
+  type: article
+  title: Rethinking Scale Imbalance in Semi-supervised Object Detection for Aerial Images
+  language: en
+  url:
+    value: https://arxiv.org/abs/2310.14718
+    date: 2026-09-14
+  parent:
+    type: periodical
+    title: arXiv
+  date: 2023-10-23
+  serial-number:
+    doi: 10.48550/arXiv.2310.14718
+  author:
+    - Zhang, Ruixiang
+    - Xu, Chang
+    - Xu, Fang
+    - Yang, Wen
+    - He, Guangjun
+    - Yu, Huai
+    - Xia, Gui-Song
+zhangRiverFloatingObject2025:
+  type: article
+  title: River floating object detection with transformer model in real time
+  volume: 15
+  page-range: 9026
+  url:
+    value: https://pmc.ncbi.nlm.nih.gov/articles/PMC11911429/
+    date: 2025-11-25
+  parent:
+    type: periodical
+    title: Scientific Reports
+  date: 2025-03-16
+  serial-number:
+    doi: 10.1038/s41598-025-93659-1
+    issn: 2045-2322
+    pmid: '40091136'
+    pmcid: PMC11911429
+  author:
+    - Zhang, Chong
+    - Yue, Jie
+    - Fu, Jianglong
+    - Wu, Shouluan
+zhangS4ODSemiSupervisedLearning2022:
+  type: article
+  title: 'S4OD: Semi-Supervised learning for Single-Stage Object Detection'
+  language: en
+  url:
+    value: https://arxiv.org/abs/2204.04492
+    date: 2026-09-14
+  parent:
+    type: periodical
+    title: arXiv
+  date: 2022-04-09
+  serial-number:
+    doi: 10.48550/arXiv.2204.04492
+  author:
+    - Zhang, Yueming
+    - Yao, Xingxu
+    - Liu, Chao
+    - Chen, Feng
+    - Song, Xiaolin
+    - Xing, Tengfei
+    - Hu, Runbo
+    - Chai, Hua
+    - Xu, Pengfei
+    - Zhang, Guoshan
+zhangSemiDETRSemiSupervisedObject2023:
+  type: article
+  title: 'Semi-DETR: Semi-Supervised Object Detection with Detection Transformers'
+  url:
+    value: http://arxiv.org/abs/2307.08095
+    date: 2026-06-18
+  parent:
+    type: periodical
+    title: arXiv
+  date: 2023-07-16
+  serial-number:
+    doi: 10.48550/arXiv.2307.08095
+  author:
+    - Zhang, Jiacheng
+    - Lin, Xiangru
+    - Zhang, Wei
+    - Wang, Kuo
+    - Tan, Xiao
+    - Han, Junyu
+    - Ding, Errui
+    - Wang, Jingdong
+    - Li, Guanbin
+zhaoDETRsBeatYOLOs2024:
+  type: article
+  title: DETRs Beat YOLOs on Real-time Object Detection
+  url:
+    value: http://arxiv.org/abs/2304.08069
+    date: 2025-11-25
+  parent:
+    type: periodical
+    title: arXiv
+  date: 2024-04-03
+  serial-number:
+    doi: 10.48550/arXiv.2304.08069
+  author:
+    - Zhao, Yian
+    - Lv, Wenyu
+    - Xu, Shangliang
+    - Wei, Jinman
+    - Wang, Guanzhong
+    - Dang, Qingqing
+    - Liu, Yi
+    - Chen, Jie
+zhuDeformableDETRDeformable2021:
+  type: article
+  title: 'Deformable DETR: Deformable Transformers for End-to-End Object Detection'
+  url:
+    value: http://arxiv.org/abs/2010.04159
+    date: 2026-10-06
+  parent:
+    type: periodical
+    title: arXiv
+  date: 2021-03-18
+  serial-number:
+    doi: 10.48550/arXiv.2010.04159
+  author:
+    - Zhu, Xizhou
+    - Su, Weijie
+    - Lu, Lewei
+    - Li, Bin
+    - Wang, Xiaogang
+    - Dai, Jifeng

@@ -31,6 +31,7 @@
   scope: scope,
   {
     set text(size: 0.85em)
+    show raw: set text(size: 0.85em)
     set par(justify: false)
     stack(
       spacing: .65em,
