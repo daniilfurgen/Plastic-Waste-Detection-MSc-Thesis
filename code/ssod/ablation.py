@@ -28,6 +28,7 @@ Batches:
   online-caps            online SSGT, full pipeline at PL caps 2400/4800/9600 x seeds 42-44 (runs/mean_teacher/ablation-online-caps)
   online-fractions       online SSGT at the 4800 cap: 10/25/50% labels vs. GT-only controls, plus the full-label control x seeds 42-44 (runs/mean_teacher/ablation-online-fractions)
   ucwd-online-fractions  online-fractions on UCWD, the rest of the train split repeated to the 4800 cap (runs/mean_teacher/ablation-ucwd-online-fractions)
+  arch-online            YOLOv8m/YOLO11m at 10% and 100% of the labels, online SSL vs. GT-only x seeds 42-43 (runs/mean_teacher/ablation-arch-online)
 
 All batches now run the online pipeline (per-step pseudo-labels with EMA score histograms). Their
 results so far were produced by the offline per-epoch pipeline at git tag `offline-ssgt`; batches up
@@ -636,6 +637,60 @@ BATCHES["ucwd-online-fractions"] = Batch(
     run_warmup={run: f"{run.split('pct-')[0]}pct-warmup" for run in _ucwd_online_runs},
     unlabeled_rest=True,
 )
+
+# Other detectors under the final online pipeline at the best and worst case for SSL (10% and 100%
+# of the FloW-img labels): online SSL at the 4,800 cap vs. a step-matched GT-only control, as in
+# `online-fractions`. YOLO26 results come from `online-fractions` / `online-caps` (seed 42 shown as
+# references). Warm-ups follow the architecture batches: same data and Ultralytics arguments as the
+# YOLO26 ones, the same optimizer-step budget per fraction; the existing YOLO11 100% warm-up is
+# reused. 10% runs are listed first (largest expected gap), seed-major so seed 42 finishes first.
+ARCH_ONLINE_SEEDS = (42, 43)
+ARCH_ONLINE_ARCHS = ("yolov8", "yolo11")
+ARCH_ONLINE_PCTS = (10, 100)
+
+
+def arch_online_batch() -> Batch:
+    configs: dict[str, list[str]] = {}
+    warmups: dict[str, Warmup] = {}
+    warmup_of: dict[str, str] = {}
+    for pct in ARCH_ONLINE_PCTS:
+        fraction = pct / 100
+        ssl_repeat = round(100 / pct)
+        n_gt = round(GT_TRAIN_IMAGES * fraction)
+        for arch in ARCH_ONLINE_ARCHS:
+            model = ["--model", f"{arch}m.pt"]
+            # `yolo11m-warmup` is the existing full-label warm-up shared with `architectures`
+            warmup = f"{arch}m-warmup" if pct == 100 else f"{arch}m-{pct}pct-warmup"
+            warmups[warmup] = Warmup(
+                fraction=fraction,
+                epochs=warmup_epochs(fraction),
+                model=f"{arch}m.pt",
+                root=WARMUP_ROOT,
+            )
+            for method, args in (
+                ("ssl", [*ONLINE_FRACTION_SSL, "--gt-repeat", str(ssl_repeat)]),
+                ("gt-only", online_gt_only(n_gt, ssl_repeat)),
+            ):
+                name = f"{arch}-{pct}pct-{method}"
+                configs[name] = [*model, *args]
+                warmup_of[name] = warmup
+    runs = seeded(configs, ARCH_ONLINE_SEEDS)
+    online_fractions = Path("runs/mean_teacher/ablation-online-fractions")
+    return Batch(
+        project=Path("runs/mean_teacher/ablation-arch-online"),
+        runs=runs,
+        references={
+            "yolo26-10pct-ssl-seed42 (ref)": online_fractions / "10pct-ssl-seed42",
+            "yolo26-10pct-gt-only-seed42 (ref)": online_fractions / "10pct-gt-only-seed42",
+            "yolo26-100pct-ssl-seed42 (ref)": Path("runs/mean_teacher/ablation-online-caps/cap-4800-seed42"),
+            "yolo26-100pct-gt-only-seed42 (ref)": online_fractions / "100pct-gt-only-seed42",
+        },
+        warmups=warmups,
+        run_warmup={run: warmup_of[run.rsplit("-seed", 1)[0]] for run in runs},
+    )
+
+
+BATCHES["arch-online"] = arch_online_batch()
 
 SUMMARY_FIELDS = [
     "run",
