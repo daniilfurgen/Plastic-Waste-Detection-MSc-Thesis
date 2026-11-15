@@ -791,8 +791,6 @@ radiosvobodaPriblizno1012Milyoniv2023:
     type: newspaper
     title: Радіо Свобода
   date: 2023-06-20
-  author:
-    - Радіо Свобода
 redmonYouOnlyLook2016:
   type: article
   title: 'You Only Look Once: Unified, Real-Time Object Detection'

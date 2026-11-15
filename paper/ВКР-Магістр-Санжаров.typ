@@ -40,10 +40,7 @@
 
 #include "sections/section-3.typ"
 
-#set heading(numbering: none)
-
-= Висновки
-#pagebreak()
+#include "sections/conclusions.typ"
 
 #bibliography(
   "./sources.yaml",
