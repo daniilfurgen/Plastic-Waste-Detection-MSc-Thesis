@@ -813,6 +813,33 @@ the labels, each over seeds 42–44. That is 18 runs plus two new warm-ups; use 
 - **Full labels.** There is no unlabeled pool at 100%, so the full-label point is the supervised
   warm-up (`100pct-warmup`), listed as a reference in the summary.
 
+#### `arch-online`: other detectors at 10% and 100% of the labels
+
+Output: `runs/mean_teacher/ablation-arch-online/`. YOLOv8m and YOLO11m with the online pipeline at the
+4,800 cap (soft weights, EMA 0.9996), SSL vs. a step-matched GT-only control at 10% and 100% of the
+FloW-img labels, seeds 42 and 43. The YOLO11m 100% warm-up is the one from `architectures`; the
+YOLOv8m 100% and the 10% warm-ups are new, with the same step budget as the YOLO26 ones. YOLO26m
+numbers are `online-fractions` and `online-caps` (three seeds).
+
+COCO mAP50-95, mean over epochs 11-15 (mean over seeds):
+
+| Model | Labels | Start | GT-only | SSL | SSL − GT-only | SSL − start |
+|---|---|---|---|---|---|---|
+| YOLOv8m | 10% | 0.338 | 0.334 | 0.350 | +0.016 | +0.012 |
+| YOLOv8m | 100% | 0.412 | 0.427 | 0.422 | −0.006 | +0.010 |
+| YOLO11m | 10% | 0.323 | 0.324 | 0.337 | +0.013 | +0.014 |
+| YOLO11m | 100% | 0.408 | 0.424 | 0.416 | −0.008 | +0.007 |
+| YOLO26m | 10% | 0.343 | 0.337 | 0.357 | +0.020 | +0.014 |
+| YOLO26m | 100% | 0.431 | 0.436 | 0.439 | +0.003 | +0.008 |
+
+- **At 10% the gain over the start is the same for all three** (+0.012 to +0.014), and SSL beats the
+  control for all three in both seeds. The hypothesis that YOLO26 gains less because of STAL/ProgLoss
+  is not supported.
+- **At 100% SSL is below the control for YOLOv8m and YOLO11m** (both seeds), while still above the
+  start. Their controls gain +0.015 and +0.016 over the start (YOLO26: +0.005), which points to
+  unconverged 50-epoch warm-ups, as in `architectures`.
+- Two seeds only; the YOLO26 numbers have three.
+
 ## Exporting results for the thesis
 
 ```bash
