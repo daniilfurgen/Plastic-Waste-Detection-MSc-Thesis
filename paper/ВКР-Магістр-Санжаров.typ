@@ -2,17 +2,17 @@
 
 #import "template.typ": *
 
-#set page(foreground: {
-  place(
-    left + horizon,
-    dx: 1cm,
-    rotate(-90deg, reflow: true)[
-      #text(fill: luma(75%), size: 24pt, font: "Iosevka")[
-        ЧЕРНЕТКА [#datetime.today().display("[day].[month].[year]")] / САНЖАРОВ Д.Р.
-      ]
-    ],
-  )
-})
+// #set page(foreground: {
+//   place(
+//     left + horizon,
+//     dx: 1cm,
+//     rotate(-90deg, reflow: true)[
+//       #text(fill: luma(75%), size: 24pt, font: "Iosevka")[
+//         ЧЕРНЕТКА [#datetime.today().display("[day].[month].[year]")] / САНЖАРОВ Д.Р.
+//       ]
+//     ],
+//   )
+// })
 
 
 #show: config.with()

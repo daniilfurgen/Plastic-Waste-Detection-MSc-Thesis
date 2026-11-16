@@ -81,6 +81,7 @@
   set block(
     spacing: line-spacing,
   )
+  set underline(evade: false)
 
   // Налаштування списків
   show: el.paragraph-enum-list.with(indent: (1cm, auto))
@@ -96,13 +97,13 @@
   show heading: set block(spacing: line-spacing)
   set heading(numbering: numbly("Розділ {1}."))
 
-  show heading.where(level: 1): smallcaps
+  show heading.where(level: 1): upper
   show heading.where(level: 3): set text(weight: "regular")
   show heading.where(level: 3): underline
 
   set outline(indent: 1em)
   show outline: set par(justify: true)
-  show outline.entry.where(level: 1): smallcaps
+  show outline.entry.where(level: 1): upper
   show outline.entry.where(level: 1): set text(weight: "bold")
 
   // Налаштування підписів
