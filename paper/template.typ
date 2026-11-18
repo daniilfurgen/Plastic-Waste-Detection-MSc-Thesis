@@ -81,7 +81,7 @@
   set block(
     spacing: line-spacing,
   )
-  set underline(evade: false)
+  set underline(evade: false, offset: .125em)
 
   // Налаштування списків
   show: el.paragraph-enum-list.with(indent: (1cm, auto))

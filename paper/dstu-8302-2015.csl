@@ -41,6 +41,14 @@
     </names>
   </macro>
 
+  <!-- Редактор збірника/книги: «за ред. І. Іваненка». -->
+  <macro name="editor-inline">
+    <names variable="editor" prefix="за ред. ">
+      <name initialize-with=". " delimiter=", " et-al-min="5" et-al-use-first="1"/>
+      <et-al/>
+    </names>
+  </macro>
+
   <!-- ДСТУ 8302:2015, розділ 7: програма — окремий вид електронного ресурсу.
        Після відповідальності йдуть відомості про видання («Версія X», п. 7.4.1),
        далі вихідні дані без «//»: програма не є складовою більшого джерела. -->
@@ -94,6 +102,8 @@
         <else-if type="paper-conference chapter" match="any">
           <group delimiter=", ">
             <text variable="container-title"/>
+            <text macro="editor-inline"/>
+            <text variable="publisher"/>
             <text variable="event-place"/>
             <text variable="publisher-place"/>
             <date variable="issued">
@@ -173,12 +183,6 @@
         </group>
         
         <text macro="container-info"/>
-        
-        <choose>
-          <if type="paper-conference chapter" match="any">
-            <text variable="publisher"/>
-          </if>
-        </choose>
         
         <group delimiter=" ">
           <label variable="page" form="short" text-case="capitalize-first"/>

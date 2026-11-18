@@ -70,7 +70,8 @@ chengFloWDatasetBenchmark2021:
   parent:
     type: proceedings
     title: IEEE/CVF International Conference on Computer Vision (ICCV)
-    location: Montreal, QC, Canada
+    publisher:
+      location: Montreal, QC, Canada
   date: 2021-10
   serial-number:
     doi: 10.1109/ICCV48922.2021.01077
@@ -802,7 +803,8 @@ redmonYouOnlyLook2016:
   parent:
     type: proceedings
     title: 2016 IEEE Conference on Computer Vision and Pattern Recognition (CVPR)
-    location: Las Vegas, NV, USA
+    publisher:
+      location: Las Vegas, NV, USA
   date: 2016-06
   serial-number:
     doi: 10.1109/CVPR.2016.91
@@ -850,14 +852,39 @@ robinsonRFDETRNeuralArchitecture2026:
 sanzharovMetodologiyaDetekciyiPlastikovih2026:
   type: article
   title: Методологія детекції пластикових відходів у водоймах з використанням нейронних мереж
+  language: uk
+  page-range: 80-83
+  url:
+    value: https://ur.knute.edu.ua/handle/123456789/16505
+    date: 2026-11-18
   parent:
-    type: conference
-    title: 'Міжнародна науково-практична конференція «Обробка даних: моделі, методи та технології» ОДММТ-2026'
-    location: Київ, Україна
+    type: proceedings
+    title: 'Обробка даних: моделі, методи та технології (ОДММТ-2026)'
+    publisher:
+      location: м. Київ, Україна
   date: 2026-05-29
+  serial-number:
+    doi: 10.31617/k.knute.2026-05-29
+    isbn: 978-966-629-378-0
   author:
     - Санжаров, Данііл
     - Філімонова, Тетяна
+sanzharovMetodologiyaDetekciyiPlastikovih2026a:
+  type: chapter
+  title: Методологія детекції пластикових відходів у водоймах з використанням нейронних мереж
+  language: uk
+  page-range: 68-70
+  parent:
+    type: book
+    title: Прикладні комп'ютерні технології
+    publisher:
+      name: Державний торговельно-економічний університет
+      location: м. Київ, Україна
+  date: 2026
+  author:
+    - Санжаров, Данііл
+  editor:
+    - Пурський, Олег
 sapkotaYOLO26KeyArchitectural2026:
   type: article
   title: 'YOLO26: Key Architectural Enhancements and Performance Benchmarking for Real-Time Object Detection'
